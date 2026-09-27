@@ -15,10 +15,10 @@ No guarda datos de personas humanas: ni DNI, ni socios, ni directores (ver
 
 ## Cómo se comparte
 
-- **Página web:** {PAGINA} — se abre en cualquier navegador, sin instalar nada.
+- **Página web:** <https://bmfoundationbm-netizen.github.io/rastreador-contrataciones/> — se abre en cualquier navegador, sin instalar nada.
   También funciona en celular, con el grafo arriba y los paneles abajo.
 - **Programa para Windows:** desde la página (botón *Programa para Windows*) o desde
-  [las versiones del repositorio]({REPO}/releases/latest). Hay una versión
+  [las versiones del repositorio](https://github.com/bmfoundationbm-netizen/rastreador-contrataciones/releases/latest). Hay una versión
   *portable* (un solo `.exe`, no se instala) y un *instalador*. Como no está firmado,
   Windows muestra "editor desconocido" la primera vez: *Más información → Ejecutar
   de todas formas*.

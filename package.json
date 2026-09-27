@@ -53,5 +53,7 @@
       "output": "dist",
       "buildResources": "build"
     }
-  }
+  },
+  "repository": "github:bmfoundationbm-netizen/rastreador-contrataciones",
+  "homepage": "https://bmfoundationbm-netizen.github.io/rastreador-contrataciones/"
 }
