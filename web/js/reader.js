@@ -73,18 +73,97 @@
     throw new Error(`Compresión no soportada dentro del ZIP (método ${e.method}).`);
   }
 
-  const DATA_EXT = /\.(csv|txt|tsv|json|jsonl|ndjson)$/i;
+  const DATA_EXT = /\.(csv|txt|tsv|json|jsonl|ndjson|xlsx)$/i;
+
+  // ── Excel (.xlsx): un ZIP con XML. Cada hoja se entrega como CSV al mismo camino. ──
+  const XML_ENT = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+  const unxml = (s) => s.replace(/&(#x[0-9a-f]+|#\d+|\w+);/gi, (m, e) => e[0] === '#'
+    ? String.fromCodePoint(e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10))
+    : (XML_ENT[e] !== undefined ? XML_ENT[e] : m));
+  const csvQuote = (v) => /[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+  function colIndex(letters) { let n = 0; for (const ch of letters) n = n * 26 + (ch.charCodeAt(0) - 64); return n - 1; }
+  async function zipText(file, e) { return new Response(await zipEntryStream(file, e)).text(); }
+
+  async function xlsxSources(file, label) {
+    const entries = await zipEntries(file);
+    const byName = new Map(entries.map((e) => [e.name.replace(/^\//, ''), e]));
+    const wb = byName.get('xl/workbook.xml');
+    if (!wb) throw new Error('El Excel no tiene hojas legibles.');
+    const wbXml = await zipText(file, wb);
+    const rels = new Map();
+    const relsE = byName.get('xl/_rels/workbook.xml.rels');
+    if (relsE) for (const m of (await zipText(file, relsE)).matchAll(/<Relationship\b[^>]*>/g)) {
+      const id = /\bId="([^"]+)"/.exec(m[0]), t = /\bTarget="([^"]+)"/.exec(m[0]);
+      if (id && t) rels.set(id[1], t[1]);
+    }
+    const sheets = [];
+    for (const m of wbXml.matchAll(/<sheet\b[^>]*>/g)) {
+      const name = unxml((/\bname="([^"]*)"/.exec(m[0]) || [])[1] || 'Hoja');
+      const rid = (/r:id="([^"]+)"/.exec(m[0]) || [])[1];
+      let target = rels.get(rid) || '';
+      target = target.startsWith('/') ? target.slice(1) : 'xl/' + target.replace(/^\.\//, '');
+      if (byName.has(target)) sheets.push({ name, entry: byName.get(target) });
+    }
+    let shared = null;
+    async function sharedStrings() {
+      if (shared) return shared;
+      shared = [];
+      const e = byName.get('xl/sharedStrings.xml');
+      if (e) for (const m of (await zipText(file, e)).matchAll(/<si>([\s\S]*?)<\/si>/g))
+        shared.push(unxml([...m[1].matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/g)].map((x) => x[1]).join('')));
+      return shared;
+    }
+    return sheets.map((sh) => ({
+      name: `${label || file.name} › ${sh.name}`, size: sh.entry.usize, file,
+      open: async () => {
+        const ss = await sharedStrings();
+        const xml = await zipText(file, sh.entry);
+        const lines = [];
+        for (const rm of xml.matchAll(/<row\b[^>]*>([\s\S]*?)<\/row>/g)) {
+          const row = [];
+          for (const cm of rm[1].matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)) {
+            const attrs = cm[1], body = cm[2] || '';
+            const ref = (/\br="([A-Z]+)\d+"/.exec(attrs) || [])[1];
+            const t = (/\bt="(\w+)"/.exec(attrs) || [])[1];
+            let v = '';
+            if (t === 'inlineStr') v = unxml([...body.matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/g)].map((x) => x[1]).join(''));
+            else {
+              const vm = /<v>([\s\S]*?)<\/v>/.exec(body);
+              v = vm ? unxml(vm[1]) : '';
+              if (t === 's') v = ss[+v] !== undefined ? ss[+v] : '';
+              else if (t === 'b') v = v === '1' ? 'sí' : 'no';
+            }
+            const ci = ref ? colIndex(ref) : row.length;
+            while (row.length < ci) row.push('');
+            row[ci] = v;
+          }
+          lines.push(row.map((x) => csvQuote(String(x))).join(','));
+        }
+        // Con salto final: una hoja con solo encabezado tambien se reconoce.
+        return new Blob([lines.join('\r\n') + '\r\n']).stream();
+      }
+    }));
+  }
 
   /* Un archivo elegido puede contener varias fuentes (un ZIP con varios CSV).
      Cada fuente sabe abrirse como stream de bytes. */
   async function listSources(file) {
+    if (/\.xlsx$/i.test(file.name)) return xlsxSources(file);
     if (/\.zip$/i.test(file.name)) {
-      const entries = (await zipEntries(file)).filter((e) => DATA_EXT.test(e.name));
-      if (!entries.length) throw new Error('El ZIP no contiene archivos CSV ni JSON.');
-      return entries.map((e) => ({
+      const all = await zipEntries(file);
+      const entries = all.filter((e) => DATA_EXT.test(e.name) && !/\.xlsx$/i.test(e.name));
+      const out = entries.map((e) => ({
         name: `${file.name} › ${e.name.split('/').pop()}`, size: e.usize, file,
         open: () => zipEntryStream(file, e)
       }));
+      // ZIP dentro del ZIP: se abre en memoria (son chicos: uno por comercio o por hoja).
+      for (const e of all.filter((x) => /\.zip$/i.test(x.name))) {
+        const inner = await new Response(await zipEntryStream(file, e)).blob();
+        Object.defineProperty(inner, 'name', { value: `${file.name} › ${e.name.split('/').pop()}` });
+        try { out.push(...await listSources(inner)); } catch (err) { /* zip interno sin datos */ }
+      }
+      if (!out.length) throw new Error('El ZIP no contiene archivos CSV ni JSON.');
+      return out;
     }
     return [{ name: file.name, size: file.size, file, open: async () => file.stream() }];
   }
@@ -282,6 +361,59 @@
       renglon: ['renglon_numero', 'renglon'],
       out: ['desestimada_si_no']
     },
+    // Items comprados, con su precio unitario: los carga cada uno (planilla modelo en la app).
+    items: {
+      proceso: PROCESO,
+      doc: ['orden_de_compra', 'documento_contractual', 'nro_orden_compra', 'numero_orden_compra', 'orden_compra', 'oc',
+        'contrato_numero', 'numero_contrato'],
+      org: ['organismo', 'organismo_nombre', 'descripcion_saf', 'comprador', 'reparticion'],
+      cuit: ['cuit_proveedor', 'cuit', 'cuit_adjudicatario'],
+      supplier: ['proveedor', 'razon_social', 'adjudicatario', 'descripcion_proveedor', 'razon_social_proveedor'],
+      date: ['fecha', 'fecha_de_adjudicacion', 'fecha_adjudicacion', 'fecha_orden_compra', 'fecha_de_compra', 'fecha_compra'],
+      renglon: ['renglon', 'renglon_numero', 'nro_renglon', 'item'],
+      desc: ['descripcion', 'descripcion_item', 'descripcion_del_item', 'item_descripcion', 'descripcion_del_renglon', 'producto',
+        'detalle', 'especificacion', 'bien_o_servicio'],
+      qty: ['cantidad', 'cantidad_adjudicada', 'cant'],
+      unit: ['unidad', 'unidad_de_medida', 'unidad_medida', 'presentacion'],
+      price: ['precio_unitario', 'precio_unitario_adjudicado', 'importe_unitario', 'valor_unitario', 'precio_unit', 'precio'],
+      total: ['precio_total', 'importe_total', 'monto_total', 'total_renglon', 'monto'],
+      currency: ['moneda'],
+      iva: ['iva_incluido', 'incluye_iva', 'con_iva'],
+      marca: ['marca', 'marca_ofertada'],
+      codigo: ['codigo', 'codigo_de_barras', 'ean', 'gtin', 'codigo_item', 'codigo_catalogo', 'codigo_sibys'],
+      rubro: ['rubro', 'rubros', 'categoria']
+    },
+    // Precios de mercado: los que carga cada uno, y los de Precios Claros (SEPA).
+    mercado: {
+      desc: ['producto', 'descripcion', 'productos_descripcion', 'descripcion_producto', 'articulo', 'nombre_producto'],
+      price: ['precio', 'precio_unitario', 'productos_precio_lista', 'precio_lista', 'valor', 'precio_de_lista'],
+      date: ['fecha', 'fecha_precio', 'fecha_relevamiento', 'fecha_de_relevamiento', 'fecha_vigencia'],
+      unit: ['unidad', 'presentacion', 'unidad_medida', 'productos_unidad_medida_presentacion'],
+      qtyPres: ['contenido', 'cantidad_presentacion', 'productos_cantidad_presentacion'],
+      fuente: ['fuente', 'comercio', 'proveedor', 'origen', 'empresa', 'bandera', 'tienda'],
+      tipo: ['tipo', 'tipo_de_precio', 'tipo_precio', 'canal'],
+      prov: ['provincia', 'region'],
+      iva: ['iva_incluido', 'incluye_iva', 'con_iva'],
+      marca: ['marca', 'productos_marca'],
+      codigo: ['codigo', 'codigo_de_barras', 'ean', 'productos_ean', 'gtin', 'id_producto'],
+      rubro: ['rubro', 'categoria']
+    },
+    // Tabla de equivalencias: que producto de mercado corresponde a cada item comprado.
+    equivalencias: {
+      itemDesc: ['item_descripcion'], itemUnit: ['item_unidad'], itemCode: ['item_codigo'],
+      prodDesc: ['producto_descripcion'], prodUnit: ['producto_unidad'], prodCode: ['producto_codigo'],
+      estado: ['estado']
+    },
+    // Precios en surtidor (Secretaria de Energia): combustibles por estacion y fecha.
+    surtidor: {
+      producto: ['producto'],
+      idproducto: ['idproducto'],
+      precio: ['precio'],
+      fecha: ['fecha_vigencia'],
+      anio: ['anio'], mes: ['mes'],
+      prov: ['provincia'],
+      horario: ['tipohorario']
+    },
     // Presupuesto abierto (credito anual): organismo (SAF), ministerio, unidades ejecutoras.
     presupuesto: {
       year: ['ejercicio_presupuestario', 'impacto_presupuestario_anio', 'ejercicio'],
@@ -306,6 +438,7 @@
   const KIND_LABEL = {
     contratos: 'Adjudicaciones / contratos', registro: 'Registro de sociedades', convocatorias: 'Convocatorias',
     ofertas: 'Ofertas', presupuesto: 'Presupuesto', ocds: 'Contrataciones OCDS',
+    items: 'Ítems comprados', mercado: 'Precios de mercado', equivalencias: 'Equivalencias de productos', surtidor: 'Combustibles en surtidor', ipc: 'Índice de precios (IPC)',
     personas: 'Datos de personas', desconocido: 'Formato no reconocido'
   };
 
@@ -324,6 +457,18 @@
     const personal = H.filter((h) => PERSONAL.has(h));
     const p = mapHeader('presupuesto', header);
     if (p.saf >= 0 && p.jur >= 0 && p.dev >= 0) return { kind: 'presupuesto', map: p, personal };
+    // Serie de tiempo de apis.datos.gob.ar: indice_tiempo y la serie del IPC. La API nombra
+    // la columna con el id de la serie o con su nombre corto (ipc_nivel_general_nacional).
+    if (H[0] === 'indice_tiempo' && H.length === 2 && (/^148_3_/.test(H[1]) || /^ipc|precios_al_consumidor/.test(H[1])))
+      return { kind: 'ipc', map: { t: 0, v: 1 }, personal };
+    const su = mapHeader('surtidor', header);
+    if (su.producto >= 0 && su.idproducto >= 0 && su.precio >= 0 && su.fecha >= 0 && su.prov >= 0) return { kind: 'surtidor', map: su, personal };
+    const eq = mapHeader('equivalencias', header);
+    if (eq.itemDesc >= 0 && eq.prodDesc >= 0) return { kind: 'equivalencias', map: eq, personal };
+    // Items antes que contratos: una planilla de items tambien trae organismo, proveedor y monto.
+    const it = mapHeader('items', header);
+    if (it.desc >= 0 && it.qty >= 0 && (it.price >= 0 || it.total >= 0) && (it.proceso >= 0 || it.doc >= 0 || it.org >= 0))
+      return { kind: 'items', map: it, personal };
     const k = mapHeader('contratos', header);
     if (k.amount >= 0 && (k.cuit >= 0 || k.supplier >= 0) && (k.org >= 0 || k.safCode >= 0 || k.uoc >= 0))
       return { kind: 'contratos', map: k, personal };
@@ -338,6 +483,9 @@
     const c = mapHeader('convocatorias', header);
     if (c.proceso >= 0 && (c.objeto >= 0 || c.estimado >= 0) && k.cuit < 0 && k.supplier < 0)
       return { kind: 'convocatorias', map: c, personal };
+    const mk = mapHeader('mercado', header);
+    if (mk.desc >= 0 && mk.price >= 0 && (mk.date >= 0 || mk.fuente >= 0 || mk.codigo >= 0) && it.qty < 0)
+      return { kind: 'mercado', map: mk, personal };
     if (personal.length) return { kind: 'personas', personal };
     return { kind: 'desconocido', personal };
   }

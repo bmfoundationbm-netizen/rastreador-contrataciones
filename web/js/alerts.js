@@ -17,7 +17,8 @@
     nueva: { label: 'Empresa recién creada', short: 'Recién creada', glyph: '◷' },
     acapara: { label: 'Proveedor dominante', short: 'Dominante', glyph: '◔' },
     monto: { label: 'Monto fuera de lo normal', short: 'Monto atípico', glyph: '▲' },
-    domicilio: { label: 'Domicilio legal compartido', short: 'Mismo domicilio', glyph: '⌂' }
+    domicilio: { label: 'Domicilio legal compartido', short: 'Mismo domicilio', glyph: '⌂' },
+    precio: { label: 'Precio sobre la referencia', short: 'Precio', glyph: '$' }
   };
   // Paleta de estado (fija): siempre acompaniada del rotulo de texto.
   const LEVELS = [
@@ -271,8 +272,11 @@
       }
     }
 
+    // ── 5. precio unitario por encima del precio de referencia de mercado ──
+    if (RC.prices && RC.model.DB.items.length) for (const a of RC.prices.alerts(V)) add(a, a.key);
+
     list.sort((a, b) => b.sev - a.sev);
-    const counts = { nueva: 0, acapara: 0, monto: 0, domicilio: 0 };
+    const counts = { nueva: 0, acapara: 0, monto: 0, domicilio: 0, precio: 0 };
     const flagged = { org: new Map(), co: new Map(), k: new Map() };
     const mark = (m, i, a) => { const p = m.get(i); if (!p || p.sev < a.sev) m.set(i, a); };
     const byId = new Map();
@@ -283,6 +287,7 @@
       if (a.type === 'acapara') { mark(flagged.org, a.org, a); for (const i of a.nodes.co) mark(flagged.co, i, a); }
       if (a.type === 'domicilio') for (const i of a.nodes.co) mark(flagged.co, i, a);
       if (a.type === 'nueva') for (const i of a.nodes.k) mark(flagged.k, i, a);
+      if (a.type === 'precio') { for (const i of a.nodes.k) mark(flagged.k, i, a); for (const i of a.nodes.co) mark(flagged.co, i, a); }
     }
     const nodeAlerts = (t, i) => list.filter((a) => (a.nodes[t] || []).includes(i) || (a.focus.t === t && a.focus.i === i));
     return { list, counts, flagged, byId, nodeAlerts };

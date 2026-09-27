@@ -149,6 +149,10 @@
     else if ((r = /^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})/.exec(s))) { d = +r[1]; m = +r[2]; y = +r[3]; }
     else if ((r = /^(\d{4})[\-\/.](\d{1,2})[\-\/.](\d{1,2})/.exec(s))) { y = +r[1]; m = +r[2]; d = +r[3]; }
     else if ((r = /^(\d{4})(\d{2})(\d{2})$/.exec(s))) { y = +r[1]; m = +r[2]; d = +r[3]; }
+    // Solo mes ("2026-09", series de tiempo y precios en surtidor).
+    else if ((r = /^(\d{4})-(\d{2})$/.exec(s))) { y = +r[1]; m = +r[2]; d = 1; }
+    // Numero de serie de Excel (dias desde 1899-12-30): asi llegan las fechas de un .xlsx.
+    else if (/^\d{5}(\.\d+)?$/.test(s) && +s > 20000 && +s < 80000) return Date.UTC(1899, 11, 30) + Math.floor(+s) * DAY;
     else return NaN;
     if (y < 1850 || y > 2100 || m < 1 || m > 12 || d < 1 || d > 31) return NaN;
     return Date.UTC(y, m - 1, d);
@@ -234,6 +238,10 @@
     estimadoRatio: 200,       // % por encima del monto estimado de la convocatoria (200 = el triple)
     domMin: 2,                // empresas minimas en un mismo domicilio
     domMasivo: 25,            // sociedades del registro a partir de las cuales el domicilio es "masivo"
+    precioUmbral: 50,         // % por encima del precio de referencia que dispara la alerta de precio
+    precioIva: 21,            // % de IVA para igualar precios con y sin IVA
+    precioMayorista: 50,      // cantidad desde la que se compara contra precios mayoristas
+    precioAuto: 72,           // puntaje minimo (0-100) para aceptar un emparejamiento sin revisar
     maxEmpresas: 300,         // nodos de empresa en el grafo
     maxContratos: 1000,       // nodos de contrato en el grafo
     etiquetas: true,
@@ -354,6 +362,14 @@
     setTimeout(() => URL.revokeObjectURL(a.href), 4000);
     return filename;
   }
+  async function saveBlob(filename, blob) {
+    if (global.rcDesktop) return global.rcDesktop.saveFile(filename, await blob.arrayBuffer());
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    return filename;
+  }
   const csvCell = (v) => {
     const s = String(v == null ? '' : v);
     return /[",;\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -367,7 +383,7 @@
     parseAmount, currencyCode, RATES_DEFAULT, CROSS, usdRate, toUSD, toDisplay, rates,
     compact, money, moneyNative, unit, int, pct,
     addrKeys, fmtAddr, locKey, hash53, quantileSorted,
-    saveText, csvCell,
+    saveText, saveBlob, csvCell,
     get settings() { return settings; }, DEFAULTS, setSettings
   });
 })(window);

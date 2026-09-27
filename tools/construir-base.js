@@ -32,12 +32,20 @@ const COMPRAR = 'sistema-de-contrataciones-electronicas';
 const CONTRATAR = 'procesos-de-contratacion-de-la-obra-publica-gestionados-en-la-plataforma-contratar';
 const RNS = 'registro-nacional-de-sociedades';
 const PRESUPUESTO = (y) => `https://dgsiaf-repo.mecon.gob.ar/repository/pa/datasets/${y}/credito-anual-${y}.zip`;
+const IPC = 'https://apis.datos.gob.ar/series/api/series/?ids=148.3_INIVELNAL_DICI_M_26&format=csv&limit=5000';
+const SURTIDOR = 'precios-en-surtidor';
+const SEPA = 'precios-claros-base-sepa', SEPA_MAY = 'precios-claros-sepa-mayorista';
+const APORTES = path.join(ROOT, 'datos', 'aportes');
+const MERCADO = path.join(ROOT, 'datos', 'mercado');
+const APORTE_TIPOS = ['items', 'mercado', 'equivalencias'];
 
 /* Fuentes en el orden en que se importan (el registro va al final: se cruza contra los
    proveedores y oferentes ya cargados). `complemento`: solo agrega documentos que no esten. */
 const FUENTES = [
   { grupo: 'Presupuesto abierto (crédito anual)', anios: [2015, new Date().getFullYear()], presupuesto: true,
     catalogo: 'https://www.presupuestoabierto.gob.ar/sici/datos-abiertos' },
+  { grupo: 'Índice de precios al consumidor (INDEC)', url: IPC, archivo: 'ipc-nivel-general.csv', nombre: 'IPC nacional, nivel general (mensual)',
+    catalogo: 'https://datos.gob.ar/series/api/series/?ids=148.3_INIVELNAL_DICI_M_26', siempre: true, opcional: true },
   { grupo: 'COMPR.AR · convocatorias', ckan: [GOB, COMPRAR, /^Convocatorias 2016 ?- ?20\d\d$/i] },
   { grupo: 'COMPR.AR · convocatorias (sistema anterior)', ckan: [GOB, COMPRAR, /^Convocatorias 20(15|16|17)( \(sistema legacy\))?$/i], varias: true, soloLegacy: true },
   { grupo: 'CONTRAT.AR · procedimientos de obra pública', ckan: [GOB, CONTRATAR, /^Procedimientos$/i] },
@@ -47,6 +55,15 @@ const FUENTES = [
   { grupo: 'COMPR.AR · adjudicaciones (sistema anterior)', ckan: [GOB, COMPRAR, /^Adjudicaciones\. Documentos Contractuales 20\d\d \(sistema legacy\)$/i], varias: true },
   { grupo: 'CONTRAT.AR · contratos de obra pública', ckan: [GOB, CONTRATAR, /^Contratos$/i] },
   { grupo: 'CONTRAT.AR · ofertas de obra pública', ckan: [GOB, CONTRATAR, /^Ofertas$/i] },
+  // Precios de mercado. Energia no sirve https (redirige a http): se usa la direccion tal cual.
+  { grupo: 'Combustibles: precios en surtidor', ckan: [GOB, SURTIDOR, /^Precios hist[oó]ricos$/i], http: true },
+  // Precios Claros solo publica la ultima semana: cada mes se guarda un resumen en datos/mercado.
+  // Si su servidor no responde, la base se arma igual.
+  { grupo: 'Precios Claros (supermercados)', ckan: [GOB, SEPA, /^Mi[eé]rcoles$/i], opcional: true, sepa: true },
+  { grupo: 'Precios Claros mayorista', ckan: [GOB, SEPA_MAY, /^Mi[eé]rcoles$/i], opcional: true, sepa: true, archivoPre: 'mayorista-' },
+  { grupo: 'Precios de mercado guardados mes a mes', dir: MERCADO },
+  // Aportes aprobados (items comprados, precios y equivalencias): despues de los contratos, antes del registro.
+  { grupo: 'Aportes aprobados', dir: APORTES },
   { grupo: 'COMPR.AR · SIPRO (proveedores)', ckan: [GOB, COMPRAR, /^SIPRO 2016 ?- ?20\d\d$/i] },
   { grupo: 'Registro Nacional de Sociedades', ckan: [JUS, RNS, /^Registro Nacional de Sociedades - +(20\d\d)$/i], ultimo: true },
   { grupo: 'Registro Nacional de Sociedades · asociaciones sin fines de lucro', ckan: [JUS, RNS, /^Registro Nacional de Sociedades - Asociaciones sin fines de lucro - (20\d\d)$/i], ultimo: true }
@@ -85,6 +102,12 @@ async function resolve() {
       for (let y = F.anios[0]; y <= F.anios[1]; y++) items.push({ F, url: PRESUPUESTO(y), nombre: `Presupuesto abierto ${y}`, catalogo: F.catalogo, opcional: y === F.anios[1] });
       continue;
     }
+    if (F.url) { items.push({ F, url: F.url, nombre: F.nombre, catalogo: F.catalogo, archivo: F.archivo, opcional: F.opcional }); continue; }
+    if (F.dir) {
+      const files = fs.existsSync(F.dir) ? fs.readdirSync(F.dir).filter((f) => /\.(csv|xlsx)$/i.test(f)).sort() : [];
+      for (const f of files) items.push({ F, local: path.join(F.dir, f), nombre: f, catalogo: repoUrl(), archivo: f });
+      continue;
+    }
     const [base, pkg, re] = F.ckan;
     const key = base + pkg;
     if (!cache.has(key)) cache.set(key, await ckanResources(base, pkg));
@@ -96,7 +119,8 @@ async function resolve() {
       hits = hits.slice(0, 1);
     }
     if (!hits.length) { log(`  ! sin recurso para "${F.grupo}"`); continue; }
-    for (const r of hits) items.push({ F, url: r.url.replace(/^http:/, 'https:'), nombre: r.name.trim(), catalogo: landing });
+    for (const r of hits) items.push({ F, url: F.http ? r.url : r.url.replace(/^http:/, 'https:'), nombre: r.name.trim(), catalogo: landing,
+      opcional: F.opcional, archivo: F.archivoPre ? F.archivoPre + fileName(r.url) : null });
   }
   return items;
 }
@@ -105,7 +129,7 @@ async function resolve() {
 function loadApp() {
   globalThis.window = globalThis;
   const JS = path.join(ROOT, 'web', 'js');
-  for (const f of ['core.js', 'reader.js', 'model.js']) vm.runInThisContext(fs.readFileSync(path.join(JS, f), 'utf8'), { filename: f });
+  for (const f of ['core.js', 'reader.js', 'xlsx.js', 'model.js']) vm.runInThisContext(fs.readFileSync(path.join(JS, f), 'utf8'), { filename: f });
   return globalThis.RC;
 }
 async function asFile(p, name) {
@@ -122,14 +146,18 @@ async function asFile(p, name) {
   const items = await resolve();
   log(`${items.length} archivos.`);
   for (const it of items) {
+    if (it.local) { it.dest = it.local; it.file = it.archivo; it.bytes = fs.statSync(it.local).size; log(`  · ${it.nombre.padEnd(62)} ${mb(it.bytes)} (local)`); continue; }
     // El nombre local lleva el anio para no pisar archivos que se llaman igual en distintos anios.
-    it.file = fileName(it.url);
+    it.file = it.archivo || fileName(it.url);
+    // El IPC y Precios Claros cambian todo el tiempo: se bajan siempre.
+    if ((it.F.siempre || it.F.sepa) && fs.existsSync(path.join(DL, it.file)) && !isFreshToday(path.join(DL, it.file))) fs.unlinkSync(path.join(DL, it.file));
+    if (it.F.sepa) it.fechaDatos = Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate());
     try {
       const d = await download(it.url, it.file);
       it.dest = d.dest; it.bytes = d.bytes;
       log(`  ${d.cached ? '·' : '↓'} ${it.nombre.padEnd(62)} ${mb(d.bytes)}`);
     } catch (e) {
-      if (it.opcional) { log(`  - ${it.nombre}: todavía no publicado (${e.message})`); continue; }
+      if (it.opcional) { log(`  - ${it.nombre}: no disponible (${e.message})`); it.error = e.message; continue; }
       throw e;
     }
   }
@@ -138,11 +166,16 @@ async function asFile(p, name) {
   const warn = console.warn; console.warn = () => {};        // sin IndexedDB en Node: el guardado se omite
   const fuentes = [];
   for (const it of items) {
-    if (!it.dest) continue;
+    if (!it.dest) {
+      if (it.error) fuentes.push({ grupo: it.F.grupo, nombre: it.nombre, url: it.url, catalogo: it.catalogo, archivo: it.file, tipo: null,
+        resultado: `no disponible este mes (${it.error})`, error: it.error });
+      continue;
+    }
     const t = Date.now();
     let st = null, err = null;
     const ui = { detected() {}, start() {}, progress() {}, failed(_s, e) { err = e; }, done(_s, s) { st = s; } };
-    await RC.model.importFiles([await asFile(it.dest, it.file)], ui, null, { complemento: !!it.F.complemento });
+    await RC.model.importFiles([await asFile(it.dest, it.file)], ui, null, { complemento: !!it.F.complemento, base: true, fechaDatos: it.fechaDatos,
+      solo: it.F.dir === APORTES ? APORTE_TIPOS : null });
     const res = st ? resumen(st) : `error: ${err && err.message}`;
     log(`  ${err ? '✗' : '✓'} ${it.nombre.padEnd(62)} ${((Date.now() - t) / 1000).toFixed(1).padStart(5)} s  ${res}`);
     fuentes.push({ grupo: it.F.grupo, nombre: it.nombre, url: it.url, catalogo: it.catalogo, archivo: it.file, bytes: it.bytes,
@@ -158,6 +191,7 @@ async function asFile(p, name) {
     totales: {
       contratos: DB.ks.length, empresas: DB.cos.length, organismos: DB.orgs.filter((o) => o.merged === undefined).length,
       ministerios: jurs.size, ofertas: DB.bids.proc.length, presupuesto: DB.budget.size,
+      items: DB.items.length, productos: DB.mkt.length, precios: DB.obs.prod.length, ipc: DB.ipc.size,
       personasOmitidas: DB.omit.org.length
     },
     fuentes
@@ -169,6 +203,24 @@ async function asFile(p, name) {
   const head = `/* Base incluida del Rastreador de Contrataciones (${hoy}). La genera tools/construir-base.js; no editar a mano. */\n`;
   fs.writeFileSync(path.join(OUT, 'base.js'), head + 'window.RC_BASE = ' + JSON.stringify({ meta, data: gz.toString('base64') }) + ';\n');
   fs.writeFileSync(path.join(OUT, 'base-meta.js'), head + 'window.RC_BASE_META = ' + JSON.stringify(meta) + ';\n');
+
+  // Resumen del mes de Precios Claros en datos/mercado: esa fuente solo publica la ultima
+  // semana, asi que la historia de precios se arma guardando un resumen por mes.
+  if (process.env.GITHUB_ACTIONS || process.argv.includes('--guardar-mercado')) {
+    const O = DB.obs, mes = new Date().toISOString().slice(0, 7), lines = ['producto,unidad,precio,fecha,fuente,tipo,codigo,marca'];
+    const q = (v) => /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v);
+    for (let i = 0; i < O.prod.length; i++) {
+      const fuente = DB.dict.fte[O.fuente[i]];
+      if (!/^Precios Claros/.test(fuente) || RC.isoDate(O.date[i]).slice(0, 7) !== mes) continue;
+      const p = DB.mkt[O.prod[i]];
+      lines.push([p.desc, p.unit, O.price[i].toFixed(2), RC.isoDate(O.date[i]), fuente, O.tipo[i] === 'may' ? 'mayorista' : 'minorista', p.codigo, p.marca].map(q).join(','));
+    }
+    if (lines.length > 1) {
+      fs.mkdirSync(MERCADO, { recursive: true });
+      fs.writeFileSync(path.join(MERCADO, `precios-claros-${mes}.csv`), lines.join('\n') + '\n');
+      log(`  Resumen de Precios Claros guardado: datos/mercado/precios-claros-${mes}.csv (${lines.length - 1} precios)`);
+    }
+  }
 
   // En GitHub Actions se deja registro de cada actualizacion: ademas de servir de historial,
   // ese commit mensual evita que GitHub desactive la tarea programada por inactividad.
@@ -188,6 +240,9 @@ async function asFile(p, name) {
   log(`Listo en ${((Date.now() - t0) / 1000).toFixed(0)} s.`);
   process.exit(0);
 })().catch((e) => { console.error('\nNo se pudo construir la base:', e.message); process.exit(1); });
+
+function isFreshToday(p) { return Date.now() - fs.statSync(p).mtimeMs < 20 * 3600 * 1000; }
+function repoUrl() { const p = publicacion(); return p ? p.repo : ''; }
 
 /* Donde se publica: la pagina de GitHub Pages y la descarga del programa para Windows.
    Sale de GITHUB_REPOSITORY (en GitHub Actions) o del campo "repository" de package.json. */
@@ -214,6 +269,11 @@ function resumen(st) {
   if (st.tipo === 'presupuesto') return `${n(st.aceptados)} organismo-años`;
   if (st.tipo === 'registro') return `${n(st.sociedades)} sociedades, ${n(st.cruzadas)} de ${n(st.proveedores)} proveedores cruzados`;
   if (st.tipo === 'convocatorias') return `${n(st.aceptados)} procesos`;
+  if (st.tipo === 'ipc') return `${n(st.aceptados)} meses`;
+  if (st.tipo === 'surtidor') return `${n(st.rows)} registros, ${n(st.aceptados)} precios mensuales`;
+  if (st.tipo === 'mercado') return `${n(st.aceptados)} precios de ${n(st.rows)} filas`;
+  if (st.tipo === 'items') return `${n(st.aceptados)} ítems, ${n(st.cruzadas)} unidos a su contrato`;
+  if (st.tipo === 'equivalencias') return `${n(st.aceptados)} equivalencias`;
   if (st.tipo === 'ofertas') return `${n(st.aceptados)} ofertas de sociedades (${n(st.humanas + st.sinMarcador)} de personas, sin guardar)`;
   return `${n(st.aceptados)} contratos, ${n(st.humanas + st.sinMarcador)} con personas (sin identidad)` + (st.duplicados ? `, ${n(st.duplicados)} ya estaban` : '');
 }

@@ -1,0 +1,92 @@
+# Rastreador de Contrataciones · aportes de precios
+#
+# Cuando se pone la etiqueta "aprobado" en una propuesta de precios:
+#   1. baja los archivos adjuntos (.xlsx o .csv)
+#   2. los revisa con el lector de la app (tools/validar-aporte.js): solo items,
+#      precios y equivalencias, sin datos de personas ni filas de ejemplo
+#   3. si estan bien, los guarda en datos/aportes y cierra la propuesta
+#      (entran en la base en la actualizacion del 1 de cada mes); si no, comenta
+#      que falla y quita la etiqueta para volver a aprobar despues de corregir.
+# Solo quien administra el repositorio puede poner etiquetas: esa es la aprobacion.
+name: Sumar aporte aprobado
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: aportes
+  cancel-in-progress: false
+
+jobs:
+  sumar:
+    name: Revisar y guardar el aporte
+    if: github.event.label.name == 'aprobado'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      N: ${{ github.event.issue.number }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # El texto de la propuesta lo escribe cualquiera: se pasa por variable de entorno
+      # (nunca dentro del script) y de cada enlace solo se usa un nombre saneado.
+      - name: Bajar los archivos adjuntos
+        env:
+          BODY: ${{ github.event.issue.body }}
+        run: |
+          mkdir -p entrada
+          printf '%s' "$BODY" \
+            | grep -oE 'https://github\.com/(user-attachments/files|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/files)/[0-9]+/[^] )"<>]+' \
+            | sort -u > enlaces.txt || true
+          while read -r url; do
+            name=$(printf '%s' "${url##*/}" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-80)
+            case "${name,,}" in *.xlsx|*.csv) ;; *) echo "Salteo $name (no es .xlsx ni .csv)"; continue ;; esac
+            curl -fsSL --max-filesize 26214400 -o "entrada/issue-$N-$name" "$url"
+            echo "Bajado: issue-$N-$name"
+          done < enlaces.txt
+          ls entrada | grep -q . || echo "Sin archivos adjuntos."
+
+      - name: Revisar
+        id: revisar
+        run: |
+          if ! ls entrada | grep -q .; then
+            printf '%s\n' '**No encontré archivos adjuntos.** Adjuntá el Excel o CSV arrastrándolo al texto de la propuesta y volvé a poner la etiqueta.' > resumen.md
+            echo "ok=0" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          set +e
+          node tools/validar-aporte.js entrada/* > resumen.md
+          echo "ok=$([ $? -eq 0 ] && echo 1 || echo 0)" >> "$GITHUB_OUTPUT"
+          cat resumen.md
+
+      - name: Guardar en datos/aportes
+        if: steps.revisar.outputs.ok == '1'
+        run: |
+          mkdir -p datos/aportes
+          mv entrada/* datos/aportes/
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add datos/aportes
+          git commit -m "Aporte de precios (#$N)"
+          git pull --rebase
+          git push
+
+      - name: Avisar en la propuesta
+        if: always()
+        run: |
+          [ -f resumen.md ] || printf '%s\n' 'No se pudo revisar el aporte: mirá el registro de la tarea en Actions.' > resumen.md
+          gh issue comment "$N" --repo "$GITHUB_REPOSITORY" --body-file resumen.md
+          if [ "${{ steps.revisar.outputs.ok }}" = "1" ]; then
+            gh issue close "$N" --repo "$GITHUB_REPOSITORY" --reason completed
+          else
+            gh issue edit "$N" --repo "$GITHUB_REPOSITORY" --remove-label aprobado
+          fi

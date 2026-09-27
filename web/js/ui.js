@@ -11,13 +11,14 @@
   const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
   const esc = RC.esc;
 
-  const ALL_TYPES = ['nueva', 'acapara', 'monto', 'domicilio'];
+  const ALL_TYPES = ['nueva', 'acapara', 'monto', 'domicilio', 'precio'];
   const state = {
     f: { from: NaN, to: NaN, min: NaN, max: NaN, orgs: new Set(), pts: new Set() },
     V: null, A: null,
     types: new Set(ALL_TYPES),
     sel: null, alert: null, alertLimit: 120,
-    orgQuery: '', orgOrder: null, open: new Set(), busy: false
+    orgQuery: '', orgOrder: null, open: new Set(), busy: false,
+    pview: 'org', plimit: 150
   };
 
   // ── estado ──────────────────────────────────────────────
@@ -44,7 +45,7 @@
     state.A = RC.alerts.compute(state.V);
     if (state.alert && !state.A.byId.has(state.alert)) state.alert = null;
     RC.graph.build(state.V, state.A);
-    renderSummary(); renderHud(); renderAlerts(); renderHisto(); renderOrgs(); renderDetail(); statusData();
+    renderSummary(); renderHud(); renderAlerts(); renderHisto(); renderOrgs(); renderDetail(); renderPrecios(); statusData();
     if (DB.ks.length) status(`Vista actualizada en ${Math.round(RC.now() - t0)} ms.`);
   }
   const refreshSoon = RC.debounce(refresh, 160);
@@ -323,7 +324,7 @@
   function lvlStyle(sev) { const l = RC.alerts.level(sev); return { l, css: `--c:${l.color}` }; }
   function renderAlerts() {
     const A = state.A, T = RC.alerts.TYPES;
-    const counts = A ? A.counts : { nueva: 0, acapara: 0, monto: 0, domicilio: 0 };
+    const counts = A ? A.counts : { nueva: 0, acapara: 0, monto: 0, domicilio: 0, precio: 0 };
     $('#alertTypes').innerHTML = ALL_TYPES.map((t) =>
       `<div class="atype ${state.types.has(t) ? 'on' : ''}" data-t="${t}" title="${esc(T[t].label)}"><span class="g">${T[t].glyph}</span>${esc(T[t].short)}<span class="n">${RC.int(counts[t])}</span></div>`).join('');
     const list = A ? A.list.filter((a) => state.types.has(a.type)) : [];
@@ -361,7 +362,8 @@
     const refs = [];
     for (const t of ['org', 'co', 'k']) for (const i of a.nodes[t] || []) refs.push({ t, i });
     RC.graph.pinMany(refs);
-    RC.graph.select(a.focus, { emphasis: a.nodes, focus: true, from: 'alert' });
+    if (a.focus.t === 'item') RC.graph.select(null, { emphasis: a.nodes, focus: true, from: 'alert' });
+    else RC.graph.select(a.focus, { emphasis: a.nodes, focus: true, from: 'alert' });
     $$('.alert').forEach((el) => el.classList.toggle('on', el.dataset.a === a.id));
     showTab('detalle');
     renderDetail();
@@ -372,7 +374,14 @@
     opts = opts || {};
     state.alert = null;
     state.sel = ref;
-    if (ref && ref.t === 'jur') {
+    if (ref && (ref.t === 'item' || ref.t === 'prod')) {
+      // Items y productos de mercado no son nodos: se resalta el contrato, el organismo y la empresa.
+      const DB = RC.model.DB, em = { org: [], co: [], k: [] };
+      const its = ref.t === 'item' ? [DB.items[ref.i]] : ((RC.prices.analyze().byProd.get(ref.i) || []).map((q) => RC.prices.analyze().rows[q].t));
+      for (const t of its) { if (t.org >= 0) em.org.push(t.org); if (t.co >= 0) em.co.push(t.co); if (t.k >= 0) em.k.push(t.k); }
+      if (em.k.length) RC.graph.pinMany(em.k.map((i) => ({ t: 'k', i })));
+      RC.graph.select(null, { emphasis: em, focus: opts.focus !== false && em.org.length + em.k.length > 0, from: 'ui' });
+    } else if (ref && ref.t === 'jur') {
       // Un ministerio no es un nodo: se resaltan sus organismos, sus contratos y sus proveedores.
       RC.graph.select(null, { emphasis: jurEmphasis(ref.i), focus: opts.focus !== false, from: 'ui' });
     } else {
@@ -407,7 +416,7 @@
     $$('#right .tab').forEach((b) => b.classList.toggle('on', b.dataset.pane === name));
     $$('#right .pane').forEach((p) => p.classList.toggle('on', p.dataset.pane === name));
   }
-  $$('#right .tab').forEach((b) => b.addEventListener('click', () => showTab(b.dataset.pane)));
+  $$('#right .tab').forEach((b) => b.addEventListener('click', () => { showTab(b.dataset.pane); if (b.dataset.pane === 'precios') renderPrecios(); }));
 
   // ── fichas de detalle ───────────────────────────────────
   function renderDetail() {
@@ -420,6 +429,8 @@
     const a = state.alert && state.A.byId.get(state.alert);
     if (a) html += whyBlock(a, true);
     if (ref.t === 'jur') html += detailJur(ref.i);
+    else if (ref.t === 'item') html += detailItem(ref.i, a);
+    else if (ref.t === 'prod') html += detailProd(ref.i);
     else if (ref.t === 'org') html += detailOrg(ref.i, a);
     else if (ref.t === 'co') html += detailCo(ref.i, a);
     else html += detailK(ref.i, a);
@@ -429,6 +440,8 @@
     if (tl) wireTimeline(tl);
     const bc = $('.bchart', el);
     if (bc) wireBudgetChart(bc);
+    const pc = $('.pchart', el);
+    if (pc) wirePriceChart(pc);
   }
 
   function whyBlock(a, withEvidence) {
@@ -450,7 +463,7 @@
     if (!list.length) return '';
     return `<div class="dsec"><h3>Alertas <span class="dim">${list.length}</span></h3>${list.map((a) => whyBlock(a, false)).join('')}</div>`;
   }
-  const kindHead = (t, extra) => `<div class="dkind"><span class="sw ${t === 'jur' ? 'org' : t}"></span>${{ jur: 'Ministerio o jurisdicción', org: 'Organismo', co: 'Empresa', k: 'Contrato' }[t]}${extra || ''}</div>`;
+  const kindHead = (t, extra) => `<div class="dkind"><span class="sw ${t === 'jur' ? 'org' : t === 'item' || t === 'prod' ? 'k' : t}"></span>${{ jur: 'Ministerio o jurisdicción', org: 'Organismo', co: 'Empresa', k: 'Contrato', item: 'Ítem comprado', prod: 'Producto de mercado' }[t]}${extra || ''}</div>`;
   const statBox = (label, value) => `<div class="stat"><div class="sl">${label}</div><div class="sv">${value}</div></div>`;
   const inView = (t, i) => { const V = state.V; return t === 'org' ? V.orgN[i] > 0 : t === 'co' ? V.coN[i] > 0 : V.has[i] === 1; };
   const outNote = (t, i) => inView(t, i) ? '' : `<div class="dsub"><span class="warn">No aparece con los filtros actuales.</span></div>`;
@@ -485,6 +498,7 @@
       `<h2 class="dtitle">${esc(o.name)}</h2>` + dependency(o) + outNote('org', i) +
       `<div class="stats">${statBox('Adjudicado', RC.money(total))}${statBox('Contratos', RC.int(V.orgN[i] + V.omitN[i]))}${statBox('Proveedores', RC.int(byCo.size))}</div>` +
       nodeAlerts('org', i, a) +
+      priceSection('org', i) +
       budgetSection([i], RC.model.budgetOf(i)) +
       `<div class="dsec"><h3>A quién le compra <span class="dim">HHI ${Math.round(hhi * 10000)}</span></h3><div class="bars">${bars || '<div class="faint">—</div>'}</div></div>` +
       `<div class="dsec"><h3>Contratos más grandes <span class="dim">${RC.int(ks.length)} con empresas</span></h3><div class="rows">` +
@@ -659,6 +673,7 @@
       `<div class="stats">${statBox('Adjudicado', RC.money(V.coSum[i]))}${statBox('Contratos', RC.int(V.coN[i]))}${statBox('Organismos', RC.int(byOrg.size))}</div>` +
       timeline(c, allKs) +
       nodeAlerts('co', i, a) +
+      priceSection('co', i) +
       bidsSection(i) +
       (orgs.length ? `<div class="dsec"><h3>Le vende a</h3><div class="rows">${orgs.slice(0, 10).map(([o, v]) =>
         `<div class="rowi" data-ref="org:${o}"><span class="rn">${esc(DB.orgs[o].name)}</span><span class="rv">${RC.money(v)}</span></div>`).join('')}</div></div>` : '') +
@@ -757,6 +772,295 @@
       `<dl class="kv">${kv.map(([x, v]) => `<dt>${x}</dt><dd>${v}</dd>`).join('')}</dl>` + cmp + nodeAlerts('k', i, a);
   }
 
+  // ── precios ─────────────────────────────────────────────
+  // Unidad en la que se muestra un precio comparable: por comprimido, por litro, por kilo o por unidad.
+  function perUnit(scale) {
+    if (scale.dim === 'ml') return { k: 1000, txt: 'por litro' };
+    if (scale.dim === 'g') return { k: 1000, txt: 'por kilo' };
+    if (scale.dim === 'm3') return { k: 1, txt: 'por m³' };
+    return { k: 1, txt: 'por unidad' };
+  }
+  const ESTADO = { auto: 'automático', confirmado: 'confirmado', pendiente: 'para revisar', rechazado: 'rechazado', 'sin-par': 'sin par' };
+  function renderPrecios() {
+    const DB = RC.model.DB, pane = $('#pList');
+    if (!pane) return;
+    const V = state.V;
+    if (!DB.items.length) {
+      $('#pStats').innerHTML = '';
+      $('#pViews').innerHTML = '';
+      $('#precioCount').textContent = '';
+      pane.innerHTML = `<div class="none" style="text-align:left;padding:18px 12px">` +
+        `<p style="margin:0 0 10px"><b>Para comparar precios hacen falta los ítems de cada compra</b>: qué se compró, cuánto y a qué precio unitario. ` +
+        `Los datos públicos de compras solo traen el total de cada orden de compra.</p>` +
+        `<p style="margin:0 0 10px">Cargá una planilla de ítems comprados (desde cuadros comparativos, pliegos o expedientes) y, si tenés, una de precios de mercado. ` +
+        `<b>Planillas modelo</b> baja las dos en Excel, con instrucciones.</p>` +
+        `<p style="margin:0">La base ya trae ${RC.int(DB.obs.prod.length)} precios de mercado de ${RC.int(DB.mkt.length)} productos${DB.ipc.size ? ' y el IPC para ajustar por inflación' : ''}.</p></div>`;
+      return;
+    }
+    const X = RC.prices.analyze(), sum = RC.prices.summary(V);
+    $('#precioCount').textContent = sum.arriba ? RC.int(sum.arriba) : '';
+    $('#pStats').innerHTML =
+      `<div class="stat"><div class="sl">Ítems</div><div class="sv">${RC.int(sum.items)}</div></div>` +
+      `<div class="stat"><div class="sl">Comparados</div><div class="sv">${RC.int(sum.comparados)}</div></div>` +
+      `<div class="stat"><div class="sl">Sobre ${RC.settings.precioUmbral} %</div><div class="sv">${RC.int(sum.arriba)}</div></div>` +
+      `<div class="stat"><div class="sl">Diferencia estimada</div><div class="sv">${RC.money(sum.exceso)}</div></div>`;
+    const views = [['org', 'Organismos'], ['co', 'Empresas'], ['items', 'Ítems'], ['revisar', `Revisar${sum.pendientes ? ` (${sum.pendientes})` : ''}`], ['sinpar', `Sin par${sum.sinPar ? ` (${sum.sinPar})` : ''}`]];
+    $('#pViews').innerHTML = views.map(([k, l]) => `<span class="chip ${state.pview === k ? 'on' : ''}" data-pv="${k}">${l}</span>`).join('');
+    let html = '';
+    if (state.pview === 'org' || state.pview === 'co') {
+      const rk = RC.prices.ranking(V, state.pview);
+      const max = Math.max(1, ...rk.map((a) => a.exceso));
+      html = rk.length ? `<div class="pnote">Diferencia estimada: lo pagado por encima del precio de referencia, ítem por ítem. No es necesariamente sobreprecio.</div><div class="bars">` +
+        rk.slice(0, state.plimit).map((a) => {
+          const name = state.pview === 'org' ? DB.orgs[a.id].name : DB.cos[a.id].label;
+          return `<div class="bar ${state.pview === 'org' ? 'borg' : ''}" data-ref="${state.pview}:${a.id}"><div class="bl"><span class="bn">${esc(name)}</span>` +
+            `<span class="bv">${RC.money(a.exceso)}</span></div><div class="bt"><i style="width:${(100 * a.exceso / max).toFixed(1)}%"></i></div>` +
+            `<div class="bs">${isFinite(a.diff) ? `${a.diff >= 0 ? '+' : ''}${RC.pct(a.diff)} sobre la referencia` : ''} · ${RC.int(a.n)} ítems · ${RC.int(a.arriba)} sobre ${RC.settings.precioUmbral} %</div></div>`;
+        }).join('') + '</div>' : '<div class="none">Ningún ítem comparado con estos filtros.</div>';
+    } else if (state.pview === 'items') {
+      const rows = X.rows.filter((r) => r.ref > 0 && RC.prices.inView(r.t, V)).sort((a, b) => b.diff - a.diff);
+      html = rows.slice(0, state.plimit).map((r) => itemRow(r)).join('') || '<div class="none">Ningún ítem comparado con estos filtros.</div>';
+      if (rows.length > state.plimit) html += `<button class="btn sm ghost more" data-pmore>Mostrar más</button>`;
+    } else if (state.pview === 'revisar') {
+      // Agrupados por descripcion: se confirma una vez para todos los items iguales.
+      const groups = new Map();
+      for (const r of X.rows) if (r.estado === 'pendiente') { const g = groups.get(r.t.key); if (g) g.n++; else groups.set(r.t.key, { r, n: 1 }); }
+      html = groups.size ? `<div class="pnote">La app no está segura de estos emparejamientos. Elegí el producto de mercado que corresponde, o "Ninguno".</div>` +
+        [...groups.values()].slice(0, state.plimit).map(({ r, n }) => reviewCard(r, n)).join('') : '<div class="none">No hay emparejamientos para revisar.</div>';
+    } else {
+      const groups = new Map();
+      for (const r of X.rows) if (r.estado === 'sin-par' || r.estado === 'rechazado') { const g = groups.get(r.t.key); if (g) g.n++; else groups.set(r.t.key, { r, n: 1 }); }
+      html = groups.size ? `<div class="pnote">Ítems sin un producto de mercado parecido. Buscá uno, o cargá precios de mercado para ese producto.</div>` +
+        [...groups.values()].slice(0, state.plimit).map(({ r, n }) => reviewCard(r, n, true)).join('') : '<div class="none">Todos los ítems tienen un producto de mercado.</div>';
+    }
+    pane.innerHTML = html;
+  }
+  function itemRow(r) {
+    const DB = RC.model.DB, t = r.t, thr = RC.settings.precioUmbral / 100;
+    const lvl = r.diff >= thr ? RC.alerts.level(Math.min(1, 0.3 + r.diff / 3)) : null;
+    const pu = perUnit(r.scale);
+    return `<div class="rowi ${lvl ? 'flag' : ''}" data-ref="item:${t.i}" ${lvl ? `style="--c:${lvl.color}"` : ''}><span class="rn">${esc(t.desc)}</span>` +
+      `<span class="rv">${r.diff >= 0 ? '+' : ''}${RC.pct(r.diff)}</span>` +
+      `<span class="rs">${t.org >= 0 ? esc(DB.orgs[t.org].name) + ' · ' : ''}${RC.fmtDate(t.date)} · pagado ${RC.moneyNative(r.unitPaid * pu.k, 'ARS')} contra ${RC.moneyNative(r.ref * pu.k, 'ARS')} ${pu.txt}</span></div>`;
+  }
+  function reviewCard(r, n, search) {
+    const DB = RC.model.DB, t = r.t;
+    const cands = r.cands.slice(0, 3).map((c) => `<button class="btn xs" data-pick="${esc(t.key)}" data-prod="${esc(DB.mkt[c.j].key)}" title="Puntaje ${Math.round(c.s * 100)}">` +
+      `${esc(DB.mkt[c.j].desc)}${DB.mkt[c.j].unit ? ` · ${esc(DB.mkt[c.j].unit)}` : ''} <span class="faint">${Math.round(c.s * 100)}</span></button>`).join('');
+    return `<div class="rcard"><div class="rct"><span class="link" data-ref="item:${t.i}">${esc(t.desc)}</span>${t.unit ? ` <span class="faint">· ${esc(t.unit)}</span>` : ''}` +
+      `${n > 1 ? ` <span class="faint">· ${n} ítems iguales</span>` : ''}</div>` +
+      (r.nota ? `<div class="rcn">${esc(r.nota)}</div>` : '') +
+      `<div class="rcb">${search ? '' : cands}` +
+      `<input class="field sm" data-find="${esc(t.key)}" placeholder="Buscar otro producto…" spellcheck="false">` +
+      `${search ? '' : `<button class="btn xs ghost" data-pick="${esc(t.key)}" data-prod="">Ninguno</button>`}</div><div class="rcf"></div></div>`;
+  }
+  $('#pViews').addEventListener('click', (e) => { const c = e.target.closest('[data-pv]'); if (c) { state.pview = c.dataset.pv; state.plimit = 150; renderPrecios(); } });
+  $('#pList').addEventListener('click', async (e) => {
+    if (e.target.closest('[data-pmore]')) { state.plimit += 150; renderPrecios(); return; }
+    const b = e.target.closest('[data-pick]');
+    if (!b) return;
+    e.stopPropagation();
+    await pickMatch(b.dataset.pick, b.dataset.prod);
+  });
+  // Buscar un producto a mano para un item.
+  $('#pList').addEventListener('input', RC.debounce((e) => {
+    const inp = e.target.closest('[data-find]');
+    if (!inp) return;
+    const box = inp.closest('.rcard').querySelector('.rcf'), DB = RC.model.DB;
+    const res = inp.value.trim().length >= 3 ? RC.prices.searchProducts(inp.value, 6) : [];
+    box.innerHTML = res.map((c) => `<button class="btn xs" data-pick="${esc(inp.dataset.find)}" data-prod="${esc(DB.mkt[c.j].key)}">${esc(DB.mkt[c.j].desc)}${DB.mkt[c.j].unit ? ` · ${esc(DB.mkt[c.j].unit)}` : ''}</button>`).join('') ||
+      (inp.value.trim().length >= 3 ? '<span class="faint">Sin resultados.</span>' : '');
+  }, 200));
+  async function pickMatch(ik, prodKey) {
+    RC.model.setMatch(ik, prodKey, prodKey ? 'confirmado' : 'rechazado');
+    await RC.model.persist();
+    refresh();
+    status(prodKey ? 'Emparejamiento confirmado. Aplica a todos los ítems con la misma descripción.' : 'Marcado sin par de mercado.');
+  }
+
+  // Seccion de precios dentro de la ficha de un organismo o una empresa.
+  function priceSection(by, id) {
+    const DB = RC.model.DB;
+    if (!DB.items.length) return '';
+    const X = RC.prices.analyze();
+    const rows = X.rows.filter((r) => r.ref > 0 && (by === 'org' ? r.t.org : r.t.co) === id && RC.prices.inView(r.t, state.V));
+    if (!rows.length) return '';
+    const rk = RC.prices.ranking(state.V, by).find((a) => a.id === id);
+    rows.sort((a, b) => b.diff - a.diff);
+    return `<div class="dsec"><h3>Precios comparados <span class="dim">${RC.int(rows.length)} ítems</span></h3>` +
+      (rk ? `<div class="stats">${statBox('Diferencia estimada', RC.money(rk.exceso))}${statBox('Sobre la referencia', isFinite(rk.diff) ? RC.pct(rk.diff) : '—')}${statBox(`Sobre ${RC.settings.precioUmbral} %`, RC.int(rk.arriba))}</div>` : '') +
+      `<div class="rows">${rows.slice(0, 8).map((r) => itemRow(r)).join('')}</div></div>`;
+  }
+
+  // Ficha de un item comprado.
+  function detailItem(i, a) {
+    const DB = RC.model.DB, X = RC.prices.analyze(), r = X.rows.find((x) => x.t.i === i), t = DB.items[i];
+    const pu = perUnit(r.scale), kv = [];
+    if (t.org >= 0) kv.push(['Organismo', `<span class="link" data-ref="org:${t.org}">${esc(DB.orgs[t.org].name)}</span>`]);
+    if (t.co >= 0) kv.push(['Empresa', `<span class="link" data-ref="co:${t.co}">${esc(DB.cos[t.co].label)}</span>`]);
+    else kv.push(['Empresa', '<span class="dim">sin identificar (persona humana o sin CUIT)</span>']);
+    if (t.k >= 0) kv.push(['Contrato', `<span class="link" data-ref="k:${t.k}">${esc(DB.ks[t.k].doc || DB.ks[t.k].proc)}</span>`]);
+    else if (t.doc || t.proc) kv.push(['Contrato', `<span class="mono">${esc(t.doc || t.proc)}</span> <span class="dim">(no está en los datos cargados)</span>`]);
+    kv.push(['Fecha', RC.fmtDate(t.date)]);
+    kv.push(['Cantidad', `${RC.int(t.qty)} × ${esc(t.unit || 'unidad')}`]);
+    kv.push(['Precio pagado', `<span class="mono">${RC.moneyNative(t.price, t.cur)}</span>${t.iva ? '' : ' <span class="dim">sin IVA</span>'} por ${esc(t.unit || 'unidad')}`]);
+    if (t.marca) kv.push(['Marca', esc(t.marca)]);
+    if (t.codigo) kv.push(['Código', `<span class="mono">${esc(t.codigo)}</span>`]);
+    let cmp = '';
+    if (r.ref > 0) {
+      const y = isFinite(t.year) ? t.year : new Date().getUTCFullYear();
+      cmp = `<div class="stats">${statBox(`Pagado ${pu.txt}`, RC.moneyNative(r.unitPaid * pu.k, 'ARS'))}${statBox(`Referencia ${pu.txt}`, RC.moneyNative(r.ref * pu.k, 'ARS'))}${statBox('Diferencia', `${r.diff >= 0 ? '+' : ''}${RC.pct(r.diff)}`)}</div>` +
+        `<dl class="kv"><dt>Diferencia estimada</dt><dd>${RC.money(RC.prices.disp(r.excessARS, y))} <span class="dim">en todo el ítem</span></dd>` +
+        `<dt>Referencia</dt><dd>mediana de ${r.n} ${r.n === 1 ? 'precio' : 'precios'}${r.mayorista ? ' mayoristas' : ''} ${RC.prices.ventanaTxt(r)} (rango central ${RC.moneyNative(r.lo * pu.k, 'ARS')} a ${RC.moneyNative(r.hi * pu.k, 'ARS')}), llevados a la fecha de la compra con el IPC y con IVA</dd>` +
+        `<dt>Fuentes</dt><dd>${r.fuentes.slice(0, 4).map(esc).join(' · ')}</dd></dl>`;
+    }
+    const match = r.m >= 0
+      ? `<div class="dsec"><h3>Producto de mercado <span class="dim">${ESTADO[r.estado]}${r.estado === 'auto' ? `, puntaje ${Math.round(r.s * 100)}` : ''}</span></h3>` +
+        `<div class="rows"><div class="rowi" data-ref="prod:${r.m}"><span class="rn">${esc(DB.mkt[r.m].desc)}</span><span class="rv">${esc(DB.mkt[r.m].unit || '')}</span></div></div>` +
+        `<div class="rcb" style="margin-top:8px">${r.estado === 'auto' ? `<button class="btn xs" data-pick2="${esc(t.key)}" data-prod="${esc(DB.mkt[r.m].key)}">Confirmar</button>` : ''}` +
+        `<button class="btn xs ghost" data-pick2="${esc(t.key)}" data-prod="">No es este producto</button></div></div>`
+      : `<div class="dsec"><h3>Producto de mercado <span class="dim">${ESTADO[r.estado]}</span></h3>${r.nota ? `<div class="rcn">${esc(r.nota)}</div>` : ''}` +
+        `<div class="rcb">${r.cands.slice(0, 3).map((c) => `<button class="btn xs" data-pick2="${esc(t.key)}" data-prod="${esc(DB.mkt[c.j].key)}">${esc(DB.mkt[c.j].desc)} <span class="faint">${Math.round(c.s * 100)}</span></button>`).join('')}</div>` +
+        `<div class="faint" style="margin-top:6px">También se puede buscar otro en la pestaña Precios › Revisar o Sin par.</div></div>`;
+    return kindHead('item') + `<h2 class="dtitle">${esc(t.desc)}</h2>` +
+      `<dl class="kv">${kv.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>` + cmp +
+      nodeAlerts('item', i, a) + match + (r.m >= 0 ? priceChart(r.m, [r]) : '');
+  }
+  $('#detail').addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-pick2]');
+    if (!b) return;
+    await pickMatch(b.dataset.pick2, b.dataset.prod);
+  });
+
+  // Ficha de un producto de mercado: sus precios en el tiempo y quien lo compro a cuanto.
+  function detailProd(m) {
+    const DB = RC.model.DB, X = RC.prices.analyze(), p = DB.mkt[m];
+    const rows = (X.byProd.get(m) || []).map((q) => X.rows[q]).filter((r) => r.ref > 0).sort((a, b) => b.diff - a.diff);
+    const obsN = (X.obsBy.get(m) || []).length;
+    const origen = { usuario: 'cargado en este equipo', base: 'aporte aprobado', sepa: 'Precios Claros', surtidor: 'precios en surtidor' }[p.origen] || p.origen;
+    return kindHead('prod') + `<h2 class="dtitle">${esc(p.desc)}</h2>` +
+      `<div class="dsub">${p.unit ? `${esc(p.unit)} · ` : ''}${RC.int(obsN)} precios de mercado · ${esc(origen)}${p.codigo ? ` · <span class="mono">${esc(p.codigo)}</span>` : ''}</div>` +
+      priceChart(m, rows) +
+      `<div class="dsec"><h3>Compras de este producto <span class="dim">${RC.int(rows.length)}</span></h3><div class="rows">` +
+      (rows.map((r) => itemRow(r)).join('') || '<div class="faint">Ningún ítem comprado emparejado con este producto.</div>') + '</div></div>';
+  }
+
+  /* Grafico de precios de un producto: precio de mercado (azul) y precio pagado (naranja),
+     por unidad comparable y en pesos de cada momento. Dos series, con leyenda. */
+  let chartPts = [];
+  function priceChart(m, rows) {
+    const X = RC.prices.analyze(), q = X.prods[m], pu = perUnit(q.scale);
+    const mk = RC.prices.series(m).map((o) => ({ x: o.date, y: o.price * pu.k, s: 'm', o }));
+    const pg = rows.filter((r) => isFinite(r.t.date)).map((r) => ({ x: r.t.date, y: r.unitPaid * pu.k, s: 'p', r }));
+    const pts = mk.concat(pg).filter((d) => isFinite(d.x) && d.y > 0);
+    if (pts.length < 2) return '';
+    chartPts = pts;
+    const W = 340, H = 150, padL = 58, padB = 18, padT = 8;
+    const x0 = Math.min(...pts.map((d) => d.x)), x1 = Math.max(...pts.map((d) => d.x)) + 1;
+    const ymax = Math.max(...pts.map((d) => d.y)) * 1.08;
+    const X_ = (t) => padL + (W - padL - 8) * (t - x0) / (x1 - x0), Y_ = (v) => padT + (H - padT - padB) * (1 - v / ymax);
+    let g = '';
+    for (const f of [0, 0.5, 1]) {
+      const yy = Y_(ymax * f);
+      g += `<line x1="${padL}" x2="${W}" y1="${yy}" y2="${yy}" stroke="#1f1f27"/><text x="${padL - 5}" y="${yy + 3}" fill="#8f8f9c" font-size="9.5" text-anchor="end" font-family="IBM Plex Mono, monospace">${RC.compact(ymax * f)}</text>`;
+    }
+    const y0 = new Date(x0).getUTCFullYear(), y1 = new Date(x1).getUTCFullYear(), step = Math.max(1, Math.ceil((y1 - y0 + 1) / 6));
+    for (let y = y0; y <= y1; y += step) { const t = Date.UTC(y, 0, 1); if (t >= x0 && t <= x1) g += `<text x="${X_(t)}" y="${H - 4}" fill="#8f8f9c" font-size="9.5" text-anchor="middle" font-family="IBM Plex Mono, monospace">${y}</text>`; }
+    pts.forEach((d, n) => {
+      g += d.s === 'm'
+        ? `<circle cx="${X_(d.x).toFixed(1)}" cy="${Y_(d.y).toFixed(1)}" r="4" fill="#3987e5" stroke="#0f0f13" stroke-width="2" data-pt="${n}"/>`
+        : `<circle cx="${X_(d.x).toFixed(1)}" cy="${Y_(d.y).toFixed(1)}" r="5.5" fill="#d95926" stroke="#0f0f13" stroke-width="2" data-pt="${n}" style="cursor:pointer"/>`;
+    });
+    return `<div class="dsec"><h3>Precio en el tiempo <span class="dim">$ ${pu.txt || 'por unidad'}, de cada momento</span></h3>` +
+      `<div class="lgd"><span><i style="background:#3987e5;border-radius:50%"></i>Precio de mercado</span><span><i style="background:#d95926;border-radius:50%"></i>Precio pagado</span></div>` +
+      `<div class="pchart"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Precio de mercado y precio pagado en el tiempo">${g}</svg><div class="ttip" hidden></div></div>` +
+      `<div class="chart-note">En pesos de cada fecha: la subida general es la inflación. La comparación de cada compra usa el IPC para llevar los precios de mercado a su fecha.</div></div>`;
+  }
+  function wirePriceChart(el) {
+    const tip = $('.ttip', el), svg = $('svg', el);
+    svg.addEventListener('pointermove', (e) => {
+      const c = e.target.closest('circle[data-pt]');
+      if (!c) { tip.hidden = true; return; }
+      const d = chartPts[+c.dataset.pt], box = el.getBoundingClientRect();
+      tip.hidden = false;
+      tip.textContent = d.s === 'm' ? `${RC.fmtDate(d.x)} · mercado ${RC.moneyNative(d.y, 'ARS')} · ${d.o.fuente}`
+        : `${RC.fmtDate(d.x)} · pagado ${RC.moneyNative(d.y, 'ARS')} · ${d.r.t.org >= 0 ? RC.model.DB.orgs[d.r.t.org].name : ''}`;
+      // Dentro del recuadro del grafico, aunque el punto este en un borde.
+      const w = tip.offsetWidth, x = RC.clamp(e.clientX - box.left, w / 2, Math.max(w / 2, box.width - w / 2));
+      tip.style.left = `${x}px`; tip.style.top = `${e.clientY - box.top - 8}px`;
+    });
+    svg.addEventListener('pointerleave', () => { tip.hidden = true; });
+    svg.addEventListener('click', (e) => { const c = e.target.closest('circle[data-pt]'); if (c && chartPts[+c.dataset.pt].s === 'p') selectRef({ t: 'item', i: chartPts[+c.dataset.pt].r.t.i }); });
+  }
+
+  // Botones de la pestaña: cargar, planillas modelo, exportar y proponer.
+  $('#pCargar').addEventListener('click', () => openImport());
+  $('#pModelos').addEventListener('click', async () => {
+    const a = await RC.saveBlob('items-comprados-modelo.xlsx', RC.xlsx.templateItems());
+    const b = a ? await RC.saveBlob('precios-mercado-modelo.xlsx', RC.xlsx.templateMercado()) : null;
+    if (a || b) status('Planillas modelo guardadas. Completalas y cargalas con Importar.');
+  });
+  $('#pExcel').addEventListener('click', async () => {
+    const DB = RC.model.DB, V = state.V;
+    if (!DB.items.length) { status('Todavía no hay ítems cargados para exportar.'); return; }
+    const X = RC.prices.analyze(), u = RC.unit();
+    const rk = (by) => RC.prices.ranking(V, by).map((a) => [by === 'org' ? DB.orgs[a.id].name : DB.cos[a.id].label,
+      by === 'co' && DB.cos[a.id].cuit ? RC.fmtCuit(DB.cos[a.id].cuit) : '', a.exceso, a.pagado, a.diff, a.n, a.arriba]);
+    const rcols = (first) => [{ h: first, w: 44 }, { h: 'CUIT', w: 16 }, { h: `Diferencia estimada (${u})`, w: 20, type: 'money' },
+      { h: `Pagado en ítems comparados (${u})`, w: 22, type: 'money' }, { h: 'Sobre la referencia', w: 14, type: 'pct' }, { h: 'Ítems', w: 8, type: 'int' }, { h: `Sobre ${RC.settings.precioUmbral} %`, w: 10, type: 'int' }];
+    const itemRows = X.rows.filter((r) => RC.prices.inView(r.t, V)).map((r) => {
+      const t = r.t, pu = perUnit(r.scale);
+      return [t.desc, t.unit, t.qty, t.org >= 0 ? DB.orgs[t.org].name : '', t.co >= 0 ? DB.cos[t.co].label : '', t.doc || t.proc, t.date,
+        r.unitPaid ? r.unitPaid * pu.k : toARSplain(t), r.ref ? r.ref * pu.k : null, pu.txt, r.ref ? r.diff : null, r.ref ? r.excessARS : null,
+        r.m >= 0 ? DB.mkt[r.m].desc : '', ESTADO[r.estado], r.m >= 0 ? Math.round(r.s * 100) : null, r.n || null];
+    });
+    const blob = RC.xlsx.book([
+      { name: 'Ranking organismos', cols: rcols('Organismo'), rows: rk('org') },
+      { name: 'Ranking empresas', cols: rcols('Empresa'), rows: rk('co') },
+      { name: 'Ítems', cols: [{ h: 'Descripción', w: 44 }, { h: 'Unidad', w: 12 }, { h: 'Cantidad', w: 10, type: 'num' }, { h: 'Organismo', w: 32 },
+        { h: 'Empresa', w: 28 }, { h: 'Orden de compra', w: 16 }, { h: 'Fecha', w: 11, type: 'date' }, { h: 'Pagado ($)', w: 14, type: 'money' },
+        { h: 'Referencia ($)', w: 14, type: 'money' }, { h: 'Por', w: 10 }, { h: 'Diferencia', w: 11, type: 'pct' }, { h: 'Diferencia estimada ($)', w: 18, type: 'money' },
+        { h: 'Producto de mercado', w: 40 }, { h: 'Emparejamiento', w: 14 }, { h: 'Puntaje', w: 8, type: 'int' }, { h: 'Precios de referencia', w: 10, type: 'int' }], rows: itemRows },
+      { name: 'Nota', cols: [{ h: 'Cómo leer este archivo', w: 120 }], rows: [
+        ['La diferencia es entre el precio unitario pagado y la mediana de precios de mercado del mismo producto, de los meses más cercanos a la compra (hasta 3, 6, 12 o 24 meses, según haya), llevados a la fecha de la compra con el IPC y con IVA.'],
+        ['Para compras grandes se usan precios mayoristas si los hay. Es una diferencia con un precio de referencia, no necesariamente un sobreprecio.'],
+        [`Montos del ranking en ${u === '$' ? 'pesos nominales' : 'dólares equivalentes del año de cada compra'}. Datos al ${DB.base ? RC.fmtDate(Date.parse(DB.base.corte)) : RC.fmtDate(Date.now())}.`]] }
+    ]);
+    const p = await RC.saveBlob(`precios-comparados-${new Date().toISOString().slice(0, 10)}.xlsx`, blob);
+    if (p) status('Excel exportado.');
+  });
+  const toARSplain = (t) => t.cur === 'ARS' ? t.price : RC.toUSD(t.price, t.cur, t.year) * RC.usdRate(t.year);
+  $('#pProponer').addEventListener('click', async () => {
+    const DB = RC.model.DB, O = DB.obs;
+    const its = DB.items.filter((t) => t.u), obs = [];
+    for (let q = 0; q < O.prod.length; q++) if (O.u[q]) obs.push(q);
+    const eqv = [...DB.eqv].filter(([, e]) => e.u);
+    if (!its.length && !obs.length && !eqv.length) { status('No cargaste ítems, precios ni emparejamientos propios para proponer.'); return; }
+    const ok = await confirmBox('Proponer para la base compartida',
+      `Se arma un Excel con lo que cargaste en este equipo: ${RC.int(its.length)} ítems, ${RC.int(obs.length)} precios de mercado y ${RC.int(eqv.length)} emparejamientos confirmados. ` +
+      'Después se abre una propuesta en GitHub para que adjuntes el archivo; si se aprueba, entra en la base de todos en la actualización del 1 de cada mes. ' +
+      'Revisá que no tenga datos personales: la propuesta es pública.', 'Armar el archivo');
+    if (!ok) return;
+    const byKey = new Map(DB.mkt.map((p) => [p.key, p]));
+    const blob = RC.xlsx.book([
+      { name: 'Ítems comprados', cols: ['orden_de_compra', 'proceso', 'organismo', 'cuit_proveedor', 'fecha', 'renglon', 'descripcion', 'cantidad', 'unidad', 'precio_unitario', 'moneda', 'iva_incluido', 'marca', 'codigo', 'rubro']
+        .map((h) => ({ h, w: h === 'descripcion' ? 44 : 16, type: h === 'fecha' ? 'date' : h === 'precio_unitario' ? 'money' : h === 'cantidad' ? 'num' : 'text' })),
+        rows: its.map((t) => [t.doc, t.proc, t.org >= 0 ? DB.orgs[t.org].name : '', t.co >= 0 && DB.cos[t.co].cuit ? RC.fmtCuit(DB.cos[t.co].cuit) : '', t.date, t.renglon,
+          t.desc, t.qty, t.unit, t.price, t.cur, t.iva ? 'sí' : 'no', t.marca, t.codigo, t.rubro]) },
+      { name: 'Precios de mercado', cols: ['producto', 'unidad', 'precio', 'fecha', 'fuente', 'tipo', 'iva_incluido', 'marca', 'codigo', 'rubro']
+        .map((h) => ({ h, w: h === 'producto' ? 44 : 16, type: h === 'fecha' ? 'date' : h === 'precio' ? 'money' : 'text' })),
+        rows: obs.map((q) => { const p = DB.mkt[O.prod[q]]; return [p.desc, p.unit, O.price[q], O.date[q], DB.dict.fte[O.fuente[q]], O.tipo[q] === 'may' ? 'mayorista' : 'minorista', O.iva[q] ? 'sí' : 'no', p.marca, p.codigo, p.rubro]; }) },
+      { name: 'Equivalencias', cols: ['item_descripcion', 'item_unidad', 'item_codigo', 'producto_descripcion', 'producto_unidad', 'producto_codigo', 'estado'].map((h) => ({ h, w: /descripcion/.test(h) ? 40 : 16 })),
+        rows: eqv.map(([k, e]) => { const it = DB.items.find((t) => t.key === k) || { desc: k.split('|')[0], unit: k.split('|')[1], codigo: k.split('|')[2] }; const p = byKey.get(e.prod);
+          return [it.desc, it.unit, it.codigo, p ? p.desc : '', p ? p.unit : '', p ? p.codigo : '', e.estado]; }) }
+    ].filter((sh) => sh.rows.length));
+    const saved = await RC.saveBlob(`aporte-precios-${new Date().toISOString().slice(0, 10)}.xlsx`, blob);
+    if (!saved) return;
+    const pub = (DB.base && DB.base.publicacion) || (global.RC_BASE_META && global.RC_BASE_META.publicacion);
+    if (pub && pub.repo) openExternal(`${pub.repo}/issues/new?template=aporte-precios.yml&title=${encodeURIComponent('Aporte de precios ' + new Date().toISOString().slice(0, 10))}`);
+    status('Archivo armado. Adjuntalo en la propuesta que se abrió en GitHub.');
+  });
+
   // ── busqueda ────────────────────────────────────────────
   {
     const q = $('#q'), box = $('#qres');
@@ -772,6 +1076,13 @@
       sec('Ministerios', r.jurs, (j) => ({ ref: { t: 'jur', i: j.i }, html: `<div class="qi" data-n="${items.length}"><span class="sw org"></span><span class="qn">${esc(j.name)}</span><span class="qm">ministerio</span></div>` }));
       sec('Organismos', r.orgs, (o) => ({ ref: { t: 'org', i: o.i }, html: `<div class="qi" data-n="${items.length}"><span class="sw org"></span><span class="qn">${esc(o.name)}</span><span class="qm mono">${state.V ? RC.money(state.V.orgSum[o.i]) : ''}</span></div>` }));
       sec('Empresas', r.cos, (c) => ({ ref: { t: 'co', i: c.i }, html: `<div class="qi" data-n="${items.length}"><span class="sw co"></span><span class="qn">${esc(c.label)}</span><span class="qm mono">${c.cuit ? RC.fmtCuit(c.cuit) : ''}</span></div>` }));
+      const f = RC.fold(text).trim();
+      if (f.length >= 3) {
+        const its = DB.items.filter((t) => RC.fold(t.desc).includes(f)).slice(0, 5);
+        const prs = DB.mkt.filter((p) => RC.fold(p.desc).includes(f)).slice(0, 5);
+        sec('Ítems comprados', its, (t) => ({ ref: { t: 'item', i: t.i }, html: `<div class="qi" data-n="${items.length}"><span class="sw k"></span><span class="qn">${esc(t.desc)}</span><span class="qm mono">${RC.fmtDate(t.date)}</span></div>` }));
+        sec('Productos de mercado', prs, (p) => ({ ref: { t: 'prod', i: p.i }, html: `<div class="qi" data-n="${items.length}"><span class="sw k"></span><span class="qn">${esc(p.desc)}</span><span class="qm">${esc(p.unit || '')}</span></div>` }));
+      }
       sec('Contratos', r.ks, (k) => ({ ref: { t: 'k', i: k.i }, html: `<div class="qi" data-n="${items.length}"><span class="sw k"></span><span class="qn">${esc(k.doc || k.proc)} · ${esc(DB.cos[k.co].label)}</span><span class="qm mono">${RC.money(RC.toDisplay(k.usd, k.year))}</span></div>` }));
       box.innerHTML = html || `<div class="qe">Sin resultados para “${esc(text)}”.</div>`;
       box.hidden = false; on = items.length ? 0 : -1; mark();
@@ -1044,6 +1355,11 @@
         num('estimadoRatio', 'Sobre lo estimado', 'Cuánto por encima del monto estimado en la convocatoria dispara la alerta.', '%') +
         num('domMin', 'Empresas por domicilio', 'Proveedores en un mismo domicilio legal para señalarlo.', 'empresas') +
         num('domMasivo', 'Domicilio masivo', 'Desde cuántas sociedades inscriptas un domicilio se considera de estudio contable o jurídico (baja la severidad).', 'sociedades') +
+        `<div class="set-h">Precios</div>` +
+        num('precioUmbral', 'Precio sobre la referencia', 'Diferencia con el precio de mercado ajustado a partir de la cual se señala un ítem.', '%') +
+        num('precioIva', 'IVA', 'Para igualar precios cargados sin IVA con los que lo incluyen.', '%') +
+        num('precioMayorista', 'Compra grande', 'Desde esta cantidad, un ítem se compara con precios mayoristas (si hay).', 'unidades') +
+        num('precioAuto', 'Emparejamiento automático', 'Puntaje mínimo (0 a 100) para aceptar un producto sin revisarlo a mano.', 'puntos') +
         `<div class="set-h">Grafo</div>` +
         num('maxEmpresas', 'Empresas en pantalla', 'Las de mayor monto en la vista; las señaladas se agregan aparte.', 'nodos') +
         `<div class="set-h">Tipo de cambio oficial promedio por año (pesos por dólar)</div>` +

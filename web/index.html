@@ -139,6 +139,7 @@
       <div class="tabs" role="tablist">
         <button class="tab on" data-pane="alertas" role="tab">Alertas <span class="count mono" id="alertCount"></span></button>
         <button class="tab" data-pane="detalle" role="tab">Detalle</button>
+        <button class="tab" data-pane="precios" role="tab">Precios <span class="count mono" id="precioCount"></span></button>
       </div>
 
       <section class="pane on" data-pane="alertas">
@@ -154,6 +155,19 @@
 
       <section class="pane" data-pane="detalle">
         <div id="detail" class="detail"></div>
+      </section>
+
+      <section class="pane" data-pane="precios">
+        <div id="pStats" class="pstats"></div>
+        <div id="pViews" class="pviews"></div>
+        <div id="pList" class="plist"></div>
+        <footer class="pane-foot pfoot">
+          <button class="btn sm ghost" id="pCargar" title="Planillas de ítems comprados o de precios de mercado (CSV o Excel)">Cargar</button>
+          <button class="btn sm ghost" id="pModelos" title="Planillas modelo en Excel, con instrucciones">Planillas modelo</button>
+          <div class="grow"></div>
+          <button class="btn sm ghost" id="pProponer" title="Mandar lo que cargaste para que entre en la base de todos">Proponer</button>
+          <button class="btn sm ghost" id="pExcel" title="Ranking, ítems y referencias en un Excel">Excel</button>
+        </footer>
       </section>
     </aside>
   </div>
@@ -175,7 +189,9 @@
 <script src="data/base-meta.js"></script>
 <script src="js/core.js"></script>
 <script src="js/reader.js"></script>
+<script src="js/xlsx.js"></script>
 <script src="js/model.js"></script>
+<script src="js/prices.js"></script>
 <script src="js/alerts.js"></script>
 <script src="js/graph.js"></script>
 <script src="js/sample.js"></script>

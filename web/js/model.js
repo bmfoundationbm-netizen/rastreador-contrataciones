@@ -25,15 +25,22 @@
       cos: [], coById: new Map(),
       ks: [], kSeen: new Map(),
       omit: { org: [], date: [], amt: [], cur: [], year: [], usd: [] },
-      dict: { uoc: [''], pt: [''], dt: [''], rb: [''], rbs: [''], jur: [''], sub: [''] },
+      dict: { uoc: [''], pt: [''], dt: [''], rb: [''], rbs: [''], jur: [''], sub: [''], fte: [''] },
       dictIdx: { uoc: new Map([['', 0]]), pt: new Map([['', 0]]), dt: new Map([['', 0]]), rb: new Map([['', 0]]), rbs: new Map([['', 0]]),
-        jur: new Map([['', 0]]), sub: new Map([['', 0]]) },
+        jur: new Map([['', 0]]), sub: new Map([['', 0]]), fte: new Map([['', 0]]) },
       convoc: new Map(),
       // Ofertas de cada proceso (CONTRAT.AR): solo sociedades, igual que los contratos.
       bids: { proc: [], co: [], org: [], amt: [], rank: [] },
       bidSeen: new Set(),
       // Presupuesto abierto: `${saf}|${anio}` -> ministerio, credito, devengado y unidades ejecutoras.
       budget: new Map(),
+      // Precios: items comprados (cargados), productos y observaciones de mercado, IPC y
+      // equivalencias confirmadas. `u` marca lo cargado en este equipo (se puede proponer).
+      items: [], itemSeen: new Set(),
+      mkt: [], mktByKey: new Map(),
+      obs: { prod: [], price: [], date: [], tipo: [], iva: [], fuente: [], u: [] }, obsSeen: new Set(),
+      ipc: new Map(),
+      eqv: new Map(),
       regChecked: new Set(),
       sources: [],
       base: null,
@@ -325,6 +332,200 @@
     };
   }
 
+  // ── precios: items comprados ───────────────────────────
+  const yes = (s, def) => { const t = RC.norm(s); return !t ? def : /^(SI|S|YES|Y|1|TRUE|VERDADERO|CON IVA|INCLUIDO)$/.test(t); };
+  // Descripcion de producto: solo espacios; las comillas quedan (15,6" son pulgadas).
+  const clean = (s) => String(s == null ? '' : s).replace(/[\u0000-\u001f\u0080-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const itemKey = (desc, unit, code) => `${RC.norm(desc)}|${RC.norm(unit)}|${String(code || '').replace(/\D/g, '')}`;
+  function contractIndex() {
+    const byDoc = new Map(), byProc = new Map();
+    for (const k of DB.ks) {
+      if (k.doc) (byDoc.get(k.doc) || byDoc.set(k.doc, []).get(k.doc)).push(k);
+      if (k.proc) (byProc.get(k.proc) || byProc.set(k.proc, []).get(k.proc)).push(k);
+    }
+    return { byDoc, byProc };
+  }
+  /* Una fila por item comprado. Se une a su contrato por orden de compra o por proceso y
+     CUIT; de ahi salen organismo, empresa y fecha si la planilla no los trae. Los items
+     de personas humanas se guardan sin identidad del proveedor. */
+  function itemsSink(st) {
+    let M = null, idx = null;
+    const get = (row, f) => M[f] >= 0 ? (row[M[f]] || '').trim() : '';
+    return {
+      begin(meta) { M = meta.map; idx = contractIndex(); },
+      row(row) {
+        st.rows++;
+        const desc = clean(get(row, 'desc'));
+        const qty = RC.parseAmount(get(row, 'qty'));
+        let price = RC.parseAmount(get(row, 'price'));
+        const total = RC.parseAmount(get(row, 'total'));
+        if (!isFinite(price) && isFinite(total) && qty > 0) price = total / qty;
+        if (!desc || !(qty > 0) || !(price > 0)) { st.sinMonto++; return; }
+        const doc = RC.tidy(get(row, 'doc')), proc = RC.tidy(get(row, 'proceso'));
+        const id = RC.parseCuit(get(row, 'cuit')), name = RC.tidy(get(row, 'supplier'));
+        let k = null;
+        if (doc && idx.byDoc.has(doc)) k = idx.byDoc.get(doc).find((x) => !id.cuit || DB.cos[x.co].cuit === id.cuit) || idx.byDoc.get(doc)[0];
+        else if (proc && idx.byProc.has(proc)) k = idx.byProc.get(proc).find((x) => id.cuit && DB.cos[x.co].cuit === id.cuit) || null;
+        let date = RC.parseDate(get(row, 'date'));
+        if (!isFinite(date) && k) date = k.date;
+        let org = k ? k.org : -1;
+        if (org < 0 && get(row, 'org')) org = orgFor({ org: get(row, 'org') }).i;
+        let co = k ? k.co : -1;
+        if (co < 0) {
+          if (id.kind === 'juridica' || (id.kind !== 'humana' && name && RC.looksJuridica(name))) co = companyFor(id, name).i;
+          else if (id.kind === 'humana') st.humanas++;
+        }
+        const unit = RC.tidy(get(row, 'unit')), codigo = get(row, 'codigo').replace(/\s/g, '');
+        const key = `${doc}|${proc}|${get(row, 'renglon')}|${desc}|${qty}|${price}|${date}`;
+        if (DB.itemSeen.has(key)) { st.duplicados++; return; }
+        DB.itemSeen.add(key);
+        DB.items.push({
+          i: DB.items.length, desc: RC.own(desc), unit: RC.own(unit), qty, price, cur: RC.currencyCode(get(row, 'currency')),
+          iva: yes(get(row, 'iva'), true), date, year: isFinite(date) ? RC.yearOf(date) : NaN, org, co, k: k ? k.i : -1,
+          proc: RC.own(proc || (k ? k.proc : '')), doc: RC.own(doc || (k ? k.doc : '')), renglon: RC.own(get(row, 'renglon')),
+          marca: RC.own(RC.tidy(get(row, 'marca'))), codigo: RC.own(codigo), rubro: RC.own(RC.tidy(get(row, 'rubro'))),
+          key: itemKey(desc, unit, codigo), u: st.local ? 1 : 0
+        });
+        st.aceptados++;
+        if (k) st.cruzadas++;
+      },
+      end() {}
+    };
+  }
+
+  // ── precios: mercado ────────────────────────────────────
+  function mktProduct(desc, unit, codigo, marca, rubro, origen) {
+    const key = itemKey(desc, unit, codigo);
+    let p = DB.mktByKey.get(key);
+    if (!p) {
+      p = { i: DB.mkt.length, key, desc: RC.own(desc), unit: RC.own(unit), codigo: RC.own(codigo), marca: RC.own(marca), rubro: RC.own(rubro), origen };
+      DB.mkt.push(p); DB.mktByKey.set(key, p);
+    }
+    return p;
+  }
+  function addObs(p, price, date, tipo, iva, fuente, u) {
+    const k = `${p.i}|${price}|${date}|${fuente}`;
+    if (DB.obsSeen.has(k)) return false;
+    DB.obsSeen.add(k);
+    const O = DB.obs;
+    O.prod.push(p.i); O.price.push(price); O.date.push(date); O.tipo.push(tipo); O.iva.push(iva ? 1 : 0);
+    O.fuente.push(intern('fte', fuente)); O.u.push(u ? 1 : 0);
+    return true;
+  }
+  /* Precios de mercado. Una planilla cargada a mano va fila por fila. La de Precios Claros
+     (una fila por producto y sucursal) se resume: mediana por producto entre sucursales. */
+  function mercadoSink(st) {
+    let M = null, H = null, agg = null;
+    const get = (row, f) => M[f] >= 0 ? (row[M[f]] || '').trim() : '';
+    return {
+      begin(meta) {
+        M = meta.map; H = (meta.header || []).map(RC.reader.normHeader);
+        if (H.includes('id_sucursal')) { agg = new Map(); st.tipo = 'mercado'; }
+      },
+      row(row) {
+        st.rows++;
+        const desc = clean(get(row, 'desc')), price = RC.parseAmount(get(row, 'price'));
+        if (!desc || !(price > 0)) { st.sinMonto++; return; }
+        const pres = [get(row, 'qtyPres'), get(row, 'unit')].filter(Boolean).join(' ');
+        const codigo = get(row, 'codigo').replace(/\D/g, '');
+        if (agg) {
+          const k = codigo || RC.norm(desc) + '|' + RC.norm(pres);
+          let a = agg.get(k);
+          if (!a) agg.set(k, a = { desc, pres, codigo, marca: RC.tidy(get(row, 'marca')), prices: [] });
+          a.prices.push(price);
+          return;
+        }
+        let date = RC.parseDate(get(row, 'date'));
+        if (!isFinite(date)) date = st.fecha - (st.fecha % RC.DAY);
+        const p = mktProduct(desc, RC.tidy(get(row, 'unit')), codigo, RC.tidy(get(row, 'marca')), RC.tidy(get(row, 'rubro')), st.local ? 'usuario' : 'base');
+        const tipo = /MAYOR/.test(RC.norm(get(row, 'tipo'))) ? 'may' : 'min';
+        if (addObs(p, price, date, tipo, yes(get(row, 'iva'), true), RC.tidy(get(row, 'fuente')) || st.nombre, st.local)) st.aceptados++;
+        else st.duplicados++;
+      },
+      end() {
+        if (!agg) return;
+        const mayor = /mayorista/i.test(st.nombre);
+        const date = st.fechaDatos || (st.fecha - (st.fecha % RC.DAY));
+        // Solo productos presentes en al menos 3 sucursales: descarta cargas sueltas o erroneas.
+        for (const a of agg.values()) {
+          if (a.prices.length < 3) continue;
+          a.prices.sort((x, y) => x - y);
+          const p = mktProduct(a.desc, a.pres, a.codigo, a.marca, '', 'sepa');
+          if (addObs(p, RC.quantileSorted(a.prices, 0.5), date, mayor ? 'may' : 'min', true, `Precios Claros${mayor ? ' mayorista' : ''} (mediana de ${a.prices.length} sucursales)`, 0)) st.aceptados++;
+        }
+      }
+    };
+  }
+
+  // ── precios: combustibles en surtidor ───────────────────
+  // Mediana nacional por producto y mes. El historico tiene millones de filas; queda en unas cientas.
+  function surtidorSink(st) {
+    let M = null;
+    const agg = new Map();
+    const get = (row, f) => M[f] >= 0 ? (row[M[f]] || '').trim() : '';
+    return {
+      begin(meta) { M = meta.map; },
+      row(row) {
+        st.rows++;
+        const price = RC.parseAmount(get(row, 'precio'));
+        if (!(price > 0)) return;
+        let ym;
+        const y = get(row, 'anio'), mo = get(row, 'mes');
+        if (y && mo) ym = `${y}-${String(mo).padStart(2, '0')}`;
+        else { const d = RC.parseDate(get(row, 'fecha')); if (!isFinite(d)) return; ym = RC.isoDate(d).slice(0, 7); }
+        const prod = RC.tidy(get(row, 'producto'));
+        const k = `${prod}|${ym}`;
+        let a = agg.get(k);
+        if (!a) agg.set(k, a = { prod, ym, prices: [] });
+        a.prices.push(price);
+      },
+      end() {
+        for (const a of agg.values()) {
+          if (a.prices.length < 20) continue;
+          a.prices.sort((x, y) => x - y);
+          const unit = /GNC/i.test(a.prod) ? 'm3' : 'litro';
+          const p = mktProduct(`${a.prod} (combustible)`, unit, '', '', 'Combustibles', 'surtidor');
+          const [yy, mm] = a.ym.split('-').map(Number);
+          if (addObs(p, RC.quantileSorted(a.prices, 0.5), Date.UTC(yy, mm - 1, 15), 'min', true,
+            'Precios en surtidor (Secretaría de Energía, mediana nacional del mes)', 0)) st.aceptados++;
+        }
+      }
+    };
+  }
+
+  // ── precios: IPC ────────────────────────────────────────
+  function ipcSink(st) {
+    return {
+      begin() {},
+      row(row) {
+        st.rows++;
+        const d = RC.parseDate(row[0]), v = RC.parseAmount(row[1]);
+        if (!isFinite(d) || !(v > 0)) return;
+        DB.ipc.set(RC.isoDate(d).slice(0, 7), v);
+        st.aceptados++;
+      },
+      end() {}
+    };
+  }
+
+  // ── precios: equivalencias ──────────────────────────────
+  function eqvSink(st) {
+    let M = null;
+    const get = (row, f) => M[f] >= 0 ? (row[M[f]] || '').trim() : '';
+    return {
+      begin(meta) { M = meta.map; },
+      row(row) {
+        st.rows++;
+        const ik = itemKey(get(row, 'itemDesc'), get(row, 'itemUnit'), get(row, 'itemCode'));
+        const estado = /RECHAZ|NINGUN|NO/.test(RC.norm(get(row, 'estado'))) ? 'rechazado' : 'confirmado';
+        const pk = estado === 'rechazado' ? '' : itemKey(get(row, 'prodDesc'), get(row, 'prodUnit'), get(row, 'prodCode'));
+        DB.eqv.set(ik, { prod: pk, estado, u: st.local ? 1 : 0 });
+        st.aceptados++;
+      },
+      end() {}
+    };
+  }
+
   // ── presupuesto abierto ─────────────────────────────────
   /* Credito anual de la Administracion Nacional (presupuestoabierto.gob.ar). De cada
      organismo (SAF) y anio se guarda: ministerio (jurisdiccion), subjurisdiccion, entidad,
@@ -479,7 +680,9 @@
   }
 
   // ── importacion ─────────────────────────────────────────
-  const ORDER = { presupuesto: 0, convocatorias: 0, contratos: 1, ocds: 1, json: 1, ofertas: 1.5, registro: 2 };
+  // Los items van despues de contratos (se unen a ellos) y antes del registro (sus empresas se cruzan).
+  const ORDER = { presupuesto: 0, convocatorias: 0, ipc: 0, contratos: 1, ocds: 1, json: 1, ofertas: 1.5, items: 1.6,
+    mercado: 1.7, surtidor: 1.7, equivalencias: 1.8, registro: 2 };
 
   /* Importa varios archivos. Primero se detecta que es cada uno y se ordenan:
      convocatorias y adjudicaciones antes que el registro, que se cruza contra
@@ -490,6 +693,7 @@
       try {
         for (const src of await RC.reader.listSources(f)) {
           const info = await RC.reader.sniff(src);
+          if (info.kind === 'desconocido' && / › .*(instruc|ayuda|leeme|léame|notas)/i.test(src.name)) continue;
           jobs.push({ src, info });
           ui.detected(src, info);
         }
@@ -512,17 +716,27 @@
   async function importOne(src, info, ui, signal, opts) {
     const kind = info.kind;
     if (kind === 'personas') throw new Error('El archivo tiene datos de personas (documentos, autoridades o socios). No se importa.');
-    if (kind === 'desconocido') throw new Error('No reconozco las columnas. Se esperan adjudicaciones (monto, proveedor, organismo) o un registro de sociedades (CUIT, razón social).');
+    if (kind === 'desconocido') throw new Error('No reconozco las columnas. Se esperan adjudicaciones (monto, proveedor, organismo), un registro de sociedades (CUIT, razón social), ítems comprados o precios de mercado (ver Planillas modelo).');
+    // Los aportes de otras personas solo pueden sumar precios, nunca contratos ni sociedades.
+    if (opts && opts.solo && !opts.solo.includes(kind))
+      throw new Error(`En un aporte solo se aceptan ítems comprados, precios de mercado y equivalencias; esta hoja parece ${(RC.reader.KIND_LABEL[kind] || kind).toLowerCase()}.`);
     const st = {
       nombre: src.name, tipo: kind, rows: 0, aceptados: 0, humanas: 0, sinMarcador: 0, sinMonto: 0,
       duplicados: 0, otraMoneda: 0, fechaAprox: 0, sociedades: 0, cruzadas: 0, fecha: Date.now(),
-      complemento: !!(opts && opts.complemento)
+      complemento: !!(opts && opts.complemento),
+      // Lo que se importa desde la app (no desde el script de la base) se puede proponer.
+      local: !(opts && opts.base), fechaDatos: opts && opts.fechaDatos
     };
     let sink;
     if (kind === 'registro') sink = registrySink(st, info);
     else if (kind === 'convocatorias') sink = convocSink(st);
     else if (kind === 'ofertas') sink = bidsSink(st);
     else if (kind === 'presupuesto') sink = budgetSink(st);
+    else if (kind === 'items') sink = itemsSink(st);
+    else if (kind === 'mercado') sink = mercadoSink(st);
+    else if (kind === 'surtidor') sink = surtidorSink(st);
+    else if (kind === 'ipc') sink = ipcSink(st);
+    else if (kind === 'equivalencias') sink = eqvSink(st);
     else {
       // contratos (CSV/JSON plano) u OCDS: la clase real se confirma en begin().
       let M = null, isReg = null, isConv = null;
@@ -684,7 +898,14 @@
         amt: Float64Array.from(DB.bids.amt), rank: Int16Array.from(DB.bids.rank) },
       budget: Array.from(DB.budget.values(), (b) => [b.saf, b.year, b.jur, b.sub, b.ent, b.name, b.vig, b.dev, b.vigBS, b.devBS,
         Array.from(b.ues, ([n, u]) => [n, u[0], u[1]])]),
-      regChecked: Array.from(DB.regChecked), sources: DB.sources
+      regChecked: Array.from(DB.regChecked), sources: DB.sources,
+      items: DB.items.map((t) => [t.desc, t.unit, t.qty, t.price, t.cur, t.iva ? 1 : 0, t.date, t.org, t.co, t.k, t.proc, t.doc,
+        t.renglon, t.marca, t.codigo, t.rubro, t.u]),
+      mkt: DB.mkt.map((p) => [p.desc, p.unit, p.codigo, p.marca, p.rubro, p.origen]),
+      obs: { prod: Int32Array.from(DB.obs.prod), price: Float64Array.from(DB.obs.price), date: Float64Array.from(DB.obs.date),
+        tipo: DB.obs.tipo.map((t) => t === 'may' ? 1 : 0), iva: Uint8Array.from(DB.obs.iva), fuente: Int32Array.from(DB.obs.fuente), u: Uint8Array.from(DB.obs.u) },
+      ipc: Array.from(DB.ipc),
+      eqv: Array.from(DB.eqv, ([k, e]) => [k, e.prod, e.estado, e.u])
     };
   }
   function load(s) {
@@ -725,6 +946,25 @@
     }
     D.regChecked = new Set(s.regChecked);
     D.sources = s.sources || [];
+    for (const r of s.items || []) {
+      const [desc, unit, qty, price, cur, iva, date, org, co, k, proc, doc, renglon, marca, codigo, rubro, u] = r;
+      const d = num(date);
+      D.items.push({ i: D.items.length, desc, unit, qty, price, cur, iva: !!iva, date: d, year: isFinite(d) ? RC.yearOf(d) : NaN,
+        org, co, k, proc, doc, renglon, marca, codigo, rubro, key: itemKey(desc, unit, codigo), u: u ? 1 : 0 });
+      D.itemSeen.add(`${doc}|${proc}|${renglon}|${desc}|${qty}|${price}|${d}`);
+    }
+    for (const [desc, unit, codigo, marca, rubro, origen] of s.mkt || []) {
+      const p = { i: D.mkt.length, key: itemKey(desc, unit, codigo), desc, unit, codigo, marca, rubro, origen };
+      D.mkt.push(p); D.mktByKey.set(p.key, p);
+    }
+    if (s.obs) {
+      const O = s.obs;
+      D.obs = { prod: Array.from(O.prod), price: Array.from(O.price, num), date: Array.from(O.date, num),
+        tipo: Array.from(O.tipo, (t) => t ? 'may' : 'min'), iva: Array.from(O.iva), fuente: Array.from(O.fuente), u: Array.from(O.u) };
+      for (let q = 0; q < D.obs.prod.length; q++) D.obsSeen.add(`${D.obs.prod[q]}|${D.obs.price[q]}|${D.obs.date[q]}|${D.dict.fte[D.obs.fuente[q]]}`);
+    }
+    D.ipc = new Map(s.ipc || []);
+    for (const [k, prod, estado, u] of s.eqv || []) D.eqv.set(k, { prod, estado, u: u ? 1 : 0 });
     linkBudget();
     recomputeUSD();
     D.ver++;
@@ -758,6 +998,9 @@
     if (onStatus) onStatus('Preparando organismos, empresas y contratos…');
     await RC.tick();
     load(JSON.parse(txt));
+    for (const t of DB.items) t.u = 0;
+    DB.obs.u = DB.obs.u.map(() => 0);
+    for (const e of DB.eqv.values()) e.u = 0;
     DB.base = B.meta;
     await persist();
     RC.bus.emit('data');
@@ -807,7 +1050,12 @@
   RC.model = {
     get DB() { return DB; },
     importFiles, view, search, objeto, persist, restore, clear, recomputeUSD, pendingRegistry,
-    snapshot, load, loadBase, linkBudget, budgetOf, jurOrgs, bidIndex,
+    snapshot, load, loadBase, linkBudget, budgetOf, jurOrgs, bidIndex, itemKey,
+    // Confirmar o rechazar un emparejamiento item -> producto de mercado (queda guardado).
+    setMatch(ik, prodKey, estado) {
+      if (estado === 'auto') DB.eqv.delete(ik); else DB.eqv.set(ik, { prod: prodKey || '', estado, u: 1 });
+      DB.ver++;
+    },
     setDemo(v) { DB.demo = !!v; }
   };
 })(window);

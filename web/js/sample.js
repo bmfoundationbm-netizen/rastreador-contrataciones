@@ -117,9 +117,11 @@
       return id;
     }
     let oc = 0;
+    const firmados = [];   // contratos con empresas, para colgarles items de ejemplo
     function adj(org, pid, tipo, year, date, rubro, sup, amt, cur, dt) {
       oc++;
       const persona = sup === 'persona';
+      if (!persona && cur !== 'USD' && !dt) firmados.push({ doc: `${org[0] - 900}-${String(1000 + oc).slice(-4)}-OC${String(year).slice(2)}`, pid, date, year, rubro, sup });
       rows.push(line([pid, org[0], `${org[0]} - ${org[1]}`, org[0] - 900, `${org[0] - 900}/000 - Dirección de Administración`,
         `${org[0] - 900}/000 - Dirección de Administración`, tipo, 'Sin Modalidad', tipo === 'Contratación Directa' ? 'Apartado 1: Compulsa Abreviada Por Monto' : '',
         year, dmy(date), rubro, persona ? fmtC('20' + String(10000000 + Math.floor(R() * 29999999)) + '5') : fmtC(sup.cuit),
@@ -216,11 +218,68 @@
       regRow(c);
     }
 
+    // ── precios de ejemplo: items comprados, precios de mercado e IPC (todo inventado) ──
+    // Generador aparte, para no alterar el resto del ejemplo.
+    const P = rng(4242);
+    const between2 = (a, b) => a + (b - a) * P();
+    const PROD = [
+      { r: 'INFORMATICA', d: 'Notebook 15,6" Intel Core i5 8 GB RAM 256 GB SSD', u: 'unidad', usd: 750,
+        v: ['NOTEBOOK 15.6 PULGADAS CORE I5 8GB 256GB SSD', 'Computadora portátil i5 15,6" 8 GB 256 GB SSD'] },
+      { r: 'INFORMATICA', d: 'Monitor LED 24" Full HD', u: 'unidad', usd: 160, v: ['MONITOR 24 PULGADAS LED FULL HD', 'Monitor LED 24" 1920x1080'] },
+      { r: 'INFORMATICA', d: 'Impresora láser monocromo 40 ppm', u: 'unidad', usd: 380, v: ['IMPRESORA LASER MONOCROMATICA 40 PPM'] },
+      { r: 'INFORMATICA', d: 'Disco sólido SSD 1 TB', u: 'unidad', usd: 90, v: ['DISCO SSD 1TB', 'Unidad de estado sólido 1 TB'] },
+      { r: 'PROD. MEDICO/FARMACEUTICOS/LAB', d: 'Amoxicilina 500 mg comprimidos', u: 'caja x 16', usd: 4.5,
+        v: ['AMOXICILINA 500MG COMP', 'Amoxicilina comprimidos 500 mg'] },
+      { r: 'PROD. MEDICO/FARMACEUTICOS/LAB', d: 'Ibuprofeno 400 mg comprimidos', u: 'caja x 20', usd: 3, v: ['IBUPROFENO 400 MG COMPRIMIDOS'] },
+      { r: 'PROD. MEDICO/FARMACEUTICOS/LAB', d: 'Guantes de látex descartables talle M', u: 'caja x 100', usd: 9, v: ['GUANTES LATEX DESCARTABLES TALLE M'] },
+      { r: 'PROD. MEDICO/FARMACEUTICOS/LAB', d: 'Jeringa descartable 5 ml', u: 'caja x 100', usd: 14, v: ['JERINGAS DESCARTABLES 5ML'] }
+    ];
+    // IPC de ejemplo: sigue al tipo de cambio de cada anio, interpolado mes a mes.
+    const ipcRows = ['indice_tiempo,148.3_INIVELNAL_DICI_M_26'];
+    const ipc = new Map();
+    for (let y = 2015; y <= 2026; y++) for (let m = 0; m < 12; m++) {
+      if (y === 2026 && m > 7) break;
+      const a = rate(y), b = rate(Math.min(2026, y + 1)), v = 100 * (a + (b - a) * m / 12) / rate(2016);
+      ipc.set(`${y}-${p2(m + 1)}`, v);
+      ipcRows.push(`${y}-${p2(m + 1)}-01,${v.toFixed(4)}`);
+    }
+    const ipcAt = (t) => { const d = new Date(t); return ipc.get(`${d.getUTCFullYear()}-${p2(d.getUTCMonth() + 1)}`) || ipc.get('2026-08'); };
+    const mktPrice = (pr, t) => pr.usd * rate(2024) * ipcAt(t) / ipcAt(Date.UTC(2024, 6, 1));
+    const mercado = [line(['producto', 'unidad', 'precio', 'fecha', 'fuente', 'tipo', 'provincia', 'iva_incluido', 'rubro'])];
+    for (const pr of PROD) for (let y = 2019; y <= 2026; y++) for (const m of [2, 5, 8, 11]) {
+      if (y === 2026 && m > 8) continue;
+      if (P() < 0.35) continue;
+      const t = Date.UTC(y, m - 1, 10), may = P() < 0.5;
+      mercado.push(line([pr.d, pr.u, (mktPrice(pr, t) * (may ? 0.86 : 1) * between2(0.93, 1.08)).toFixed(2), `10/${p2(m)}/${y}`,
+        may ? 'Lista mayorista de ejemplo' : 'Relevamiento minorista de ejemplo', may ? 'mayorista' : 'minorista', 'CABA', 'sí',
+        /INFOR/.test(pr.r) ? 'Informática' : 'Medicamentos e insumos']));
+    }
+    const items = [line(['orden_de_compra', 'proceso', 'fecha', 'renglon', 'descripcion', 'cantidad', 'unidad', 'precio_unitario', 'iva_incluido', 'cuit_proveedor'])];
+    const aptos = firmados.filter((c) => /INFORMATICA|MEDICO/.test(c.rubro) && c.year >= 2019);
+    aptos.forEach((c) => {
+      const pool = PROD.filter((pr) => pr.r.slice(0, 5) === c.rubro.slice(0, 5));
+      const k = 1 + (P() < 0.4 ? 1 : 0);
+      for (let j = 0; j < k; j++) {
+        const pr = pool[Math.floor(P() * pool.length)];
+        // Casi siempre cerca del mercado; algunos muy por encima (los casos a detectar).
+        const f = P() < 0.12 ? between2(1.8, 3.2) : between2(0.9, 1.25);
+        const desc = P() < 0.6 ? pr.v[Math.floor(P() * pr.v.length)] : pr.d;
+        const qty = /caja/.test(pr.u) ? Math.round(between2(40, 900)) : Math.round(between2(2, 60));
+        items.push(line([c.doc, c.pid, dmy(c.date).slice(0, 10), j + 1, desc, qty, pr.u, (mktPrice(pr, c.date) * f).toFixed(2), 'sí', fmtC(c.sup.cuit)]));
+      }
+    });
+    // Un item sin par claro en el mercado (27" no es 24"): queda para revisar.
+    if (aptos.length) items.push(line([aptos[0].doc, aptos[0].pid, dmy(aptos[0].date).slice(0, 10), 9, 'Monitor LED 27" 2K', 4, 'unidad',
+      (mktPrice(PROD[1], aptos[0].date) * 1.9).toFixed(2), 'sí', fmtC(aptos[0].sup.cuit)]));
+
     const file = (parts, name) => new File([parts.join('\r\n') + '\r\n'], name, { type: 'text/csv' });
     return [
       file(conv, 'convocatorias-EJEMPLO-ficticio.csv'),
       file(rows, 'adjudicaciones-EJEMPLO-ficticio.csv'),
-      file(reg, 'registro-sociedades-EJEMPLO-ficticio.csv')
+      file(reg, 'registro-sociedades-EJEMPLO-ficticio.csv'),
+      file(ipcRows, 'ipc-EJEMPLO-ficticio.csv'),
+      file(mercado, 'precios-mercado-EJEMPLO-ficticio.csv'),
+      file(items, 'items-comprados-EJEMPLO-ficticio.csv')
     ];
   }
 

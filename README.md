@@ -4,9 +4,10 @@ Aplicación de escritorio para analizar sin conexión las contrataciones públic
 Argentina. Trae incluidos los datos públicos de compras, obra pública y presupuesto
 de todos los ministerios, secretarías y subsecretarías del Estado nacional, los
 cruza con el Registro Nacional de Sociedades, los muestra en un grafo 3D de
-**organismos**, **empresas** y **contratos**, y señala patrones para revisar. El
-mismo `web/` corre como app Electron y, si Electron no está, en una ventana de
-navegador.
+**organismos**, **empresas** y **contratos**, y señala patrones para revisar.
+También **compara el precio pagado por cada ítem con precios de mercado** (ver
+[Precios](#precios)). El mismo `web/` corre como app Electron y, si Electron no
+está, en una ventana de navegador.
 
 No guarda datos de personas humanas: ni DNI, ni socios, ni directores (ver
 [Privacidad](#privacidad)).
@@ -41,7 +42,7 @@ código. Si una fuente oficial falla, la tarea falla, GitHub avisa por mail y la
 sigue con los datos del mes anterior.
 
 **Cada programa instalado se actualiza solo:** el día 1 si está abierto, o la
-primera vez que se abre después. Baja la base de la página (~15 MB, no los 370 MB
+primera vez que se abre después. Baja la base de la página (~15 MB, no los 1,1 GB
 originales), la verifica y la usa en lugar de la que traía. Si no importaste nada
 encima, la carga sin preguntar. Si importaste archivos propios, pregunta una vez antes
 de reemplazarlos. **Fuentes** muestra la última consulta y tiene un botón para buscar
@@ -79,6 +80,9 @@ sola la primera vez que se abre (~4 s). Corte actual: **27/09/2026**.
 | SIPRO (proveedores) | datos.gob.ar › Sistema de Contrataciones Electrónicas | tipo de personería |
 | Registro Nacional de Sociedades 2026 y su registro de asociaciones sin fines de lucro | datos.jus.gob.ar › Registro Nacional de Sociedades | 9 005 de 9 505 proveedores cruzados |
 | Presupuesto abierto, crédito anual 2015-2026 | presupuestoabierto.gob.ar | 1 493 organismo-años: ministerio, crédito, devengado, unidades ejecutoras |
+| IPC nacional, nivel general (INDEC) | apis.datos.gob.ar › Series de tiempo | 117 meses (dic-2016 a hoy), para ajustar precios por inflación |
+| Precios en surtidor, histórico | datos.gob.ar › Secretaría de Energía | 590 precios: mediana nacional de cada mes de nafta súper y premium, gasoil grado 2 y 3, y GNC |
+| Precios Claros (SEPA), minorista y mayorista | datos.gob.ar › Secretaría de Comercio | **no disponible**: su servidor no responde (ver [Precios](#precios)) |
 
 En total: **156 151 contratos**, **9 824 empresas**, **224 organismos** de **24
 jurisdicciones**, y 101 166 contratos con personas humanas que se guardan solo como
@@ -86,9 +90,10 @@ organismo, fecha y monto. Con la base cargada la app ocupa entre 180 y 270 MB de
 
 **Renovarla:** `npm run base`. El script (`tools/construir-base.js`) busca los
 archivos vigentes con la API de cada catálogo (así toma el registro o el año de
-presupuesto nuevos sin tocar nada), los baja a `datos/descargas/` (~370 MB), los
+presupuesto nuevos sin tocar nada), los baja a `datos/descargas/` (~1,1 GB, casi
+todo el histórico de combustibles), los
 procesa con el mismo importador de la app y reescribe `web/data/base.js`. Con los
-archivos ya bajados tarda ~90 s; `npm run base -- --refrescar` los vuelve a bajar.
+archivos ya bajados tarda ~2 min 30 s; `npm run base -- --refrescar` los vuelve a bajar.
 La app en sí nunca se conecta: el script es una herramienta aparte.
 
 Cuando una app que ya tenía datos encuentra una base más nueva, pregunta una vez si
@@ -127,6 +132,8 @@ es cada uno por sus columnas y los procesa en el orden correcto.
 | CONTRAT.AR: contratos, procedimientos, ofertas | datos.gob.ar › Obra Pública | Obra pública, presupuesto oficial y todas las ofertas. |
 | Presupuesto abierto, crédito anual (ZIP) | presupuestoabierto.gob.ar | Ministerio de cada organismo, crédito y devengado, unidades ejecutoras. |
 | Cualquier publicación **OCDS** (JSON o JSONL) | otras jurisdicciones | Comprador, proveedores, adjudicaciones y contratos. |
+| **Ítems comprados** (CSV o Excel) | cuadros comparativos, órdenes de compra, expedientes | Qué se compró, cantidad y precio unitario, unido a su contrato. Ver [Precios](#precios). |
+| **Precios de mercado** (CSV o Excel) | listas de precios, relevamientos, Precios Claros | Precio de un producto en una fecha, minorista o mayorista. |
 
 El registro tiene 1,3 millones de sociedades en 3,1 millones de filas (una por
 actividad). Se cruza contra los proveedores **ya cargados** y solo se guarda lo de
@@ -138,7 +145,9 @@ con la base completa). Importar a mano adjudicaciones, convocatorias y registro
 tarda ~22 s.
 
 El lector también entiende CSV exportados de Excel: separados por `;` o tabulación,
-en Latin-1 o UTF-8 con o sin BOM, con montos `1.234.567,89` o `1,234,567.89`.
+en Latin-1 o UTF-8 con o sin BOM, con montos `1.234.567,89` o `1,234,567.89`. Lee
+también **Excel (.xlsx)**: cada hoja se trata como un archivo aparte, y las hojas de
+instrucciones se saltean.
 
 ## Qué muestra
 
@@ -234,14 +243,94 @@ un caso: tres empresas del mismo domicilio en tres procesos). Baja mucho si en e
 edificio hay 25 sociedades o más inscriptas: suele ser un estudio contable o
 jurídico que presta el domicilio (en Buenos Aires hay direcciones con más de 800).
 
+**Precio sobre la referencia.** Un ítem comprado cuyo precio unitario supera en
+50 % o más al precio de referencia del mismo producto. Solo cuentan los
+emparejamientos automáticos seguros o confirmados a mano. Ver [Precios](#precios).
+
 **Exportar CSV** baja las alertas visibles con su explicación, organismos,
 empresas, CUIT y contratos.
+
+## Precios
+
+Compara **el precio unitario pagado por cada ítem** con precios de mercado del mismo
+producto. Lo que muestra es la **diferencia con el precio de referencia**, no un
+sobreprecio: flete, plazo de pago, marca o requisitos de calidad pueden explicarla.
+
+**De dónde salen los precios pagados.** Los datos públicos de COMPR.AR traen el total
+de cada orden de compra, no los renglones con cantidad y precio unitario. Por eso los
+ítems **se cargan**: pestaña **Precios › Cargar**, con una planilla CSV o Excel
+armada a partir de cuadros comparativos, órdenes de compra o expedientes.
+**Planillas modelo** baja las dos planillas en Excel, con una hoja de instrucciones.
+Cada ítem se une a su contrato por número de orden de compra o de proceso y toma de
+ahí el organismo y la empresa.
+
+**De dónde salen los precios de mercado.**
+- Incluidos en la base: **combustibles** (Secretaría de Energía, mediana nacional
+  de cada mes) y el **IPC** del INDEC para el ajuste por inflación.
+- **Precios Claros** (SEPA): el script los intenta bajar todos los meses, pero hoy
+  su servidor (`datos.produccion.gob.ar`) no responde, así que la base se arma sin
+  ellos y **Fuentes** lo muestra. Como Precios Claros publica solo la última semana,
+  cuando vuelva a responder la tarea mensual guardará un resumen de cada mes en
+  `datos/mercado/`, y así se irá armando la historia.
+- Los que cargue cada uno: listas de precios mayoristas, relevamientos,
+  cotizaciones, con la planilla modelo de precios de mercado.
+
+**Cómo se empareja.** Por descripción: palabras en común (las raras pesan más),
+sinónimos frecuentes ("computadora portátil" = notebook, "gas oil" = gasoil,
+"comp." = comprimido) y singular/plural. Las medidas que definen el producto
+(500 mg, 256 GB, 24", 5 ml) tienen que coincidir: 500 mg no es lo mismo que 250 mg.
+Un código de barras igual es un emparejamiento seguro. Con 72 puntos o más, sin
+medidas en conflicto y con la misma clase de unidad, el emparejamiento es
+**automático**. Entre 40 y 72 queda **para revisar**. En **Precios › Revisar** se
+elige el producto correcto o *Ninguno*, y en **Sin par** se busca uno a mano. Lo
+confirmado vale para todos los ítems con la misma descripción y queda guardado.
+
+**Cómo se ajusta.**
+- **Unidad:** los dos precios se llevan a la misma unidad comparable (por
+  comprimido, por litro, por kilo, por unidad): una caja x 16 son 16 comprimidos.
+- **Fecha:** se usan los precios de mercado de los meses más cercanos a la compra
+  (hasta 3 meses antes o después; si hay menos de 3 precios, 6, 12 o 24 meses), y se
+  llevan a la fecha de la compra con el IPC.
+- **IVA:** los precios cargados sin IVA se llevan a precio con IVA (21 %).
+- **Volumen:** desde 50 unidades, si hay precios mayoristas, se compara solo con
+  esos.
+
+La referencia es la **mediana**, y la ficha muestra también el rango central.
+Umbral, IVA, cantidad mayorista y puntaje automático se cambian en **Ajustes ›
+Precios**.
+
+**Qué muestra.** La pestaña **Precios** tiene el total comparado y la **diferencia
+estimada** (lo pagado por encima de la referencia, ítem por ítem), y un **ranking
+por organismo y por empresa**. También lista los ítems ordenados por diferencia. La
+**ficha del ítem** explica la cuenta. La **ficha del producto** tiene un gráfico con
+los precios de mercado (azul) y los pagados (naranja) en el tiempo, y todas sus
+compras. Las fichas de organismo y empresa suman una sección de precios. **Excel**
+baja ranking, ítems y una nota de cómo leerlos.
+
+**Proponer para la base compartida.** Lo que carga cada uno queda en su equipo.
+**Precios › Proponer** arma un Excel con los ítems, precios y emparejamientos
+propios y abre una propuesta en GitHub
+([formulario](.github/ISSUE_TEMPLATE/aporte-precios.yml)) para adjuntarlo. La
+propuesta es pública. Cuando quien administra el repositorio le pone la etiqueta
+**aprobado**, [`.github/workflows/aportes.yml`](.github/workflows/aportes.yml):
+
+1. baja el archivo;
+2. lo revisa con `tools/validar-aporte.js`, el mismo lector de la app. Solo acepta
+   ítems, precios y equivalencias: nada de contratos ni sociedades, sin datos de
+   personas y sin las filas de ejemplo de las planillas modelo;
+3. si está bien, lo guarda en `datos/aportes/` y cierra la propuesta; si no, comenta
+   qué falla y quita la etiqueta.
+
+Lo aprobado entra en la base de todos en la actualización del 1 de cada mes. Para
+revisar un archivo a mano: `node tools/validar-aporte.js archivo.xlsx`.
 
 ## Privacidad
 
 - Proveedor con **CUIT de persona humana** (prefijo 20, 23, 24 o 27): la fila se
   descarta. Solo queda organismo, fecha y monto, sin identidad, para que los
   totales de cada organismo cierren.
+- En los **ítems comprados** pasa lo mismo: si el proveedor es una persona humana,
+  el ítem se guarda sin identidad (solo el precio, la fecha y el organismo).
 - Proveedor **sin CUIT argentino** (del exterior o vacío): se acepta solo si la
   razón social tiene un marcador societario (S.A., S.R.L., Ltd., GmbH, SpA,
   cooperativa…). Sin marcador podría ser una persona, y se trata igual que arriba.
@@ -272,7 +361,8 @@ defecto) o en pesos nominales.
 ## Datos de ejemplo
 
 **Probar con datos ficticios** genera archivos con el mismo formato que los reales
-(adjudicaciones, convocatorias y registro) y los pasa por el mismo importador.
+(adjudicaciones, convocatorias, registro, IPC, precios de mercado e ítems comprados
+de informática y medicamentos) y los pasa por el mismo importador.
 Organismos, empresas, domicilios y montos son inventados; los CUIT usan el rango
 `30-00000xxx`, que no se asigna. Trae plantado un caso de cada alerta. Mientras
 están cargados, la barra superior dice **DATOS FICTICIOS**, y se borran solos
@@ -282,21 +372,28 @@ antes de importar datos reales.
 
 ```
 tools/construir-base.js  arma la base incluida con los datos publicos (npm run base)
+tools/validar-aporte.js  revisa un aporte de precios antes de sumarlo
 datos/descargas/     archivos publicos bajados por el script (no van en la app empaquetada)
+datos/mercado/       resumen mensual de Precios Claros (esa fuente solo publica la ultima semana)
+datos/aportes/       aportes de precios aprobados; entran en la base el 1 de cada mes
 web/data/            base incluida (base.js) y su resumen (base-meta.js)
 electron/main.js     ventana, dialogos de guardado, bloqueo de red, base descargada
 electron/actualizador.js  busca y baja la base del mes desde la pagina publicada
 .github/workflows/actualizar.yml  tarea mensual: base, pagina y programa para Windows
+.github/workflows/aportes.yml     revisa y guarda un aporte de precios al aprobarlo
+.github/ISSUE_TEMPLATE/aporte-precios.yml  formulario para proponer un aporte
 datos/historial.json registro de cada actualizacion mensual
 build/               icono del programa
 electron/preload.js  puente seguro (guardar, mostrar en carpeta, abrir fuentes)
 web/index.html       la app
 web/css/app.css      sistema visual (el mismo lenguaje que Umbra Studio)
 web/js/core.js       texto, CUIT, fechas, montos, domicilios, tipo de cambio, ajustes
-web/js/reader.js     lectura en streaming: CSV, JSON/OCDS, ZIP; deteccion de formato
+web/js/reader.js     lectura en streaming: CSV, JSON/OCDS, ZIP, Excel; deteccion de formato
+web/js/xlsx.js       escritura de Excel (exportes y planillas modelo)
 web/js/model.js      organismos, empresas, contratos, ofertas y presupuesto; importacion, cruce,
                      jerarquia por ministerio, filtros, busqueda, guardado, base incluida
-web/js/alerts.js     los cuatro patrones
+web/js/alerts.js     los cinco patrones
+web/js/prices.js     comparacion de precios: emparejamiento, ajustes, referencia, ranking
 web/js/graph.js      grafo 3D: fuerzas con arbol octal y dibujo instanciado
 web/js/sample.js     generador de datos ficticios
 web/js/ui.js         interfaz
@@ -341,6 +438,17 @@ Las librerías van vendorizadas, como en Umbra: la app funciona sin red.
   lectura general tomaría "100,123" como cien mil.
 - **En la base incluida los `NaN` viajan como `null`** (JSON), e `isFinite(null)` da
   `true`: al cargar se normalizan, o una fecha desconocida pasaría por 1970.
+- **Descripción y unidad se leen por separado.** Unidas, "Gasoil grado 2" + "litro"
+  se leían como "2 litros" y el ítem no encontraba su producto.
+- **La referencia usa los precios cercanos a la compra.** El IPC corrige la
+  inflación general, no los cambios de precio relativo: con la mediana de diez años
+  ajustada por IPC, la referencia de la nafta súper de agosto de 2024 salía 12 % más
+  alta que el precio de surtidor de esos meses.
+- **La Secretaría de Energía no sirve https** (redirige a http): el histórico de
+  surtidor se baja por http, y se lo resume a la mediana nacional de cada mes y
+  producto (de 3,4 millones de registros quedan 590 precios).
+- **Una hoja de Excel con solo el encabezado** se leía mal (sin salto de línea no
+  había una fila completa): se agrega el salto al final.
 - **Los IDs de alerta salen del contenido** (tipo + a quién señala), así una alerta
   elegida sobrevive a un cambio de filtros o se descarta; con IDs secuenciales la
   ficha mostraba otra alerta.
@@ -356,3 +464,7 @@ Las librerías van vendorizadas, como en Umbra: la app funciona sin red.
 - Los domicilios de la IGJ no traen CUIT (se enlazan por número correlativo) y no
   se cruzan; el registro nacional ya trae el domicilio legal.
 - La fecha de preinscripción del SIPRO no es la de constitución y no se usa.
+- Precios Claros no responde; mientras tanto, los precios de mercado de informática y
+  medicamentos dependen de lo que se cargue o se apruebe como aporte.
+- Los ítems con precio en dólares se pasan a pesos con el promedio anual del tipo de
+  cambio, no con el del día de la compra.

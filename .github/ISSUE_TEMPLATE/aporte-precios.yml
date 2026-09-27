@@ -1,0 +1,37 @@
+name: Aporte de precios
+description: Proponer ítems comprados, precios de mercado o emparejamientos para la base compartida.
+title: "Aporte de precios"
+labels: ["aporte"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Gracias por sumar datos. Lo que se aprueba entra en la base de todos en la actualización del **1 de cada mes**.
+
+        Esta propuesta es **pública**: cualquiera puede ver el archivo que adjuntes.
+  - type: textarea
+    id: archivo
+    attributes:
+      label: Archivo
+      description: Arrastrá acá el Excel que arma la app (pestaña Precios › Proponer) o tus planillas en .xlsx o .csv (usá las planillas modelo).
+      placeholder: Arrastrá el archivo a este recuadro.
+    validations:
+      required: true
+  - type: textarea
+    id: fuente
+    attributes:
+      label: De dónde salen los datos
+      description: Por ejemplo "cuadros comparativos de ofertas de COMPR.AR, 2024" o "relevamiento de precios en farmacias de Rosario, marzo de 2025". Sin nombres de personas.
+    validations:
+      required: true
+  - type: checkboxes
+    id: controles
+    attributes:
+      label: Antes de enviar
+      options:
+        - label: El archivo no tiene datos de personas (nombres, DNI, CUIL de personas humanas, teléfonos ni correos).
+          required: true
+        - label: Los datos son públicos o puedo compartirlos.
+          required: true
+        - label: Si usé las planillas modelo, borré las filas de ejemplo.
+          required: true

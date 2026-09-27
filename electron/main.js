@@ -12,6 +12,7 @@ let baseDir = actualizador.PKG_DATA;     // carpeta de la base vigente (la de la
 const FILTERS = {
   csv: [{ name: 'Planilla CSV', extensions: ['csv'] }],
   json: [{ name: 'Datos JSON', extensions: ['json'] }],
+  xlsx: [{ name: 'Libro de Excel', extensions: ['xlsx'] }],
   png: [{ name: 'Imagen PNG', extensions: ['png'] }]
 };
 
