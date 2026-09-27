@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' blob: data:; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Rastreador de Contrataciones</title>
+<link rel="icon" href="icon.png">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<div id="app">
+
+  <!-- Barra de comandos -->
+  <header id="bar">
+    <div class="brand"><span class="mark"></span><span class="wordmark">RASTREADOR</span><span class="sub">CONTRATACIONES PÚBLICAS</span></div>
+    <div class="search">
+      <input id="q" type="search" placeholder="Buscar organismo, empresa, CUIT, expediente u objeto" spellcheck="false" autocomplete="off" aria-label="Buscar">
+      <kbd class="mono">/</kbd>
+      <div id="qres" class="qres" hidden></div>
+    </div>
+    <div class="bar-right">
+      <span id="demoPill" class="pill warn" hidden title="Los datos cargados son inventados, solo para probar la app">DATOS FICTICIOS</span>
+      <span id="basePill" class="pill" hidden></span>
+      <a class="btn ghost" id="btnDescarga" hidden target="_blank" rel="noopener">Programa para Windows</a>
+      <button class="btn ghost" id="btnSources">Fuentes</button>
+      <button class="btn ghost" id="btnSettings">Ajustes</button>
+      <button class="btn accent" id="btnImport">Importar</button>
+    </div>
+  </header>
+
+  <div id="body">
+    <!-- Filtros -->
+    <aside id="left" class="panel">
+      <div class="phead"><span>Filtros</span><button class="btn xs ghost" id="btnReset" title="Quitar todos los filtros">Limpiar</button></div>
+      <div class="pscroll">
+        <section class="group">
+          <div class="group-head">Período de adjudicación</div>
+          <div class="row2">
+            <label class="fld"><span>Desde</span><input type="date" id="fFrom"></label>
+            <label class="fld"><span>Hasta</span><input type="date" id="fTo"></label>
+          </div>
+          <div class="chips" id="yearChips"></div>
+        </section>
+
+        <section class="group">
+          <div class="group-head">Monto por contrato <span class="unit mono" id="unitLbl">US$</span></div>
+          <div class="row2">
+            <label class="fld"><span>Mínimo</span><input type="text" inputmode="decimal" id="fMin" placeholder="0" spellcheck="false"></label>
+            <label class="fld"><span>Máximo</span><input type="text" inputmode="decimal" id="fMax" placeholder="sin tope" spellcheck="false"></label>
+          </div>
+          <div class="chips" id="amountChips"></div>
+          <div class="histo-wrap">
+            <canvas id="histo" height="64" aria-label="Distribución de montos de los contratos"></canvas>
+            <div class="histo-axis mono" id="histoAxis"></div>
+            <div class="histo-tip mono" id="histoTip" hidden></div>
+          </div>
+        </section>
+
+        <section class="group">
+          <div class="group-head">Tipo de procedimiento</div>
+          <div id="ptypeList" class="checks"></div>
+        </section>
+
+        <section class="group orgs">
+          <div class="group-head">Ministerios y organismos <span class="dim mono" id="orgSelCount"></span></div>
+          <input class="field" id="orgSearch" placeholder="Filtrar ministerios u organismos" spellcheck="false">
+          <div id="orgList" class="orglist"></div>
+        </section>
+      </div>
+      <div class="summary" id="summary"></div>
+    </aside>
+
+    <!-- Grafo -->
+    <main id="stage">
+      <canvas id="gl"></canvas>
+      <div class="labels"></div>
+      <div class="tip" hidden></div>
+
+      <div id="hud" class="hud mono"></div>
+
+      <div id="legend" class="legend">
+        <div class="lg"><span class="sw org"></span>Organismo</div>
+        <div class="lg"><span class="sw co"></span>Empresa</div>
+        <div class="lg"><span class="sw k"></span>Contrato</div>
+        <div class="lg sep"><span class="halo alta"></span>Alerta alta</div>
+        <div class="lg"><span class="halo media"></span>media</div>
+        <div class="lg"><span class="halo baja"></span>baja</div>
+      </div>
+
+      <div id="stageTools" class="stage-tools">
+        <button class="btn sm ghost" id="btnFrame" title="Encuadrar todo (F)">Encuadrar</button>
+        <button class="btn sm ghost" id="btnPhysics" title="Pausar o reanudar el acomodo (Espacio)">Pausar</button>
+        <button class="btn sm ghost" id="btnLabels" title="Mostrar u ocultar rótulos (L)">Rótulos</button>
+        <label class="mini-sel" title="Cuántos contratos se dibujan como nodos">
+          <span>Contratos</span>
+          <select id="density">
+            <option value="400">400</option>
+            <option value="1000">1.000</option>
+            <option value="2500">2.500</option>
+            <option value="5000">5.000</option>
+          </select>
+        </label>
+        <button class="btn sm ghost" id="btnShot" title="Guardar una imagen del grafo">Imagen</button>
+      </div>
+
+      <div id="loading" class="empty loading" hidden>
+        <div class="empty-card">
+          <div class="spin"></div>
+          <h1>Cargando la base incluida</h1>
+          <p class="lead" id="loadingMsg"></p>
+          <p class="fine" id="loadingStep"></p>
+        </div>
+      </div>
+
+      <div id="empty" class="empty">
+        <div class="empty-card">
+          <div class="empty-mark"></div>
+          <h1>Rastreador de contrataciones públicas</h1>
+          <p class="lead">Cruza las adjudicaciones de COMPR.AR con el registro de sociedades y las muestra como un grafo de
+            <b class="t-org">organismos</b>, <b class="t-co">empresas</b> y <b class="t-k">contratos</b>, con alertas de patrones para revisar.</p>
+          <ol class="steps">
+            <li><b>Adjudicaciones</b> de COMPR.AR (datos.gob.ar, CSV).</li>
+            <li><b>Registro Nacional de Sociedades</b> (datos.jus.gob.ar, ZIP), para fecha de constitución y domicilio legal.</li>
+            <li>Opcional: <b>convocatorias</b>, para el objeto de cada proceso y su monto estimado.</li>
+          </ol>
+          <div class="empty-actions">
+            <button class="btn accent" id="btnImport2">Importar archivos</button>
+            <button class="btn ghost" id="btnSample">Probar con datos ficticios</button>
+          </div>
+          <p class="fine">Todo se procesa en tu equipo: lo que importes no se envía a ningún lado. No se guardan datos de personas humanas: ni DNI, ni socios, ni directores.</p>
+        </div>
+      </div>
+    </main>
+
+    <!-- Alertas y detalle -->
+    <aside id="right" class="panel">
+      <div class="tabs" role="tablist">
+        <button class="tab on" data-pane="alertas" role="tab">Alertas <span class="count mono" id="alertCount"></span></button>
+        <button class="tab" data-pane="detalle" role="tab">Detalle</button>
+      </div>
+
+      <section class="pane on" data-pane="alertas">
+        <div class="atypes" id="alertTypes"></div>
+        <div class="anote">Son patrones para revisar, no pruebas de irregularidad. Cada una explica qué la disparó.</div>
+        <div id="alertList" class="alist"></div>
+        <footer class="pane-foot">
+          <span class="dim" id="alertFoot"></span>
+          <div class="grow"></div>
+          <button class="btn sm ghost" id="btnExportAlerts">Exportar CSV</button>
+        </footer>
+      </section>
+
+      <section class="pane" data-pane="detalle">
+        <div id="detail" class="detail"></div>
+      </section>
+    </aside>
+  </div>
+
+  <footer id="status">
+    <span id="statusMsg">Listo.</span>
+    <div class="grow"></div>
+    <span class="faint" id="statusNote">Herramienta independiente con datos públicos · no es un sitio oficial del Estado</span>
+    <span class="mono dim" id="statusData"></span>
+  </footer>
+</div>
+
+<div id="modalRoot"></div>
+<input type="file" id="fileInput" multiple hidden accept=".csv,.txt,.tsv,.json,.jsonl,.ndjson,.zip">
+
+<script src="vendor/three.min.js"></script>
+<script src="vendor/OrbitControls.js"></script>
+
+<script src="data/base-meta.js"></script>
+<script src="js/core.js"></script>
+<script src="js/reader.js"></script>
+<script src="js/model.js"></script>
+<script src="js/alerts.js"></script>
+<script src="js/graph.js"></script>
+<script src="js/sample.js"></script>
+<script src="js/ui.js"></script>
+</body>
+</html>

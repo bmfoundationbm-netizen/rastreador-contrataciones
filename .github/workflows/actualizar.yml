@@ -1,0 +1,140 @@
+# Rastreador de Contrataciones · actualizacion mensual y publicacion
+#
+# El 1 de cada mes (06:00 de Argentina = 09:00 UTC):
+#   1. baja los datos publicos oficiales y arma la base (tools/construir-base.js)
+#   2. publica la pagina actualizada en GitHub Pages
+#   3. arma el programa para Windows con esa base y lo publica como version (release)
+# Tambien corre a mano (Actions > Run workflow) y cuando cambia el codigo.
+name: Actualizar datos y publicar
+
+on:
+  schedule:
+    - cron: '0 9 1 * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - 'electron/**'
+      - 'tools/**'
+      - 'build/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/**'
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: publicar
+  cancel-in-progress: false
+
+jobs:
+  base:
+    name: Armar la base con los datos oficiales
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Mes en curso
+        id: mes
+        run: echo "mes=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+
+      # Las descargas (~370 MB) se reusan dentro del mismo mes; un mes nuevo las baja de cero.
+      - uses: actions/cache@v4
+        with:
+          path: datos/descargas
+          key: descargas-${{ steps.mes.outputs.mes }}-${{ github.run_id }}
+          restore-keys: descargas-${{ steps.mes.outputs.mes }}-
+
+      - name: Construir la base
+        run: node --max-old-space-size=6144 tools/construir-base.js
+        env:
+          RC_REPO: ${{ github.repository }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: base
+          path: |
+            web/data/base.js
+            web/data/base-meta.js
+          retention-days: 7
+
+      # Registro de la actualizacion. El commit mensual ademas evita que GitHub apague la
+      # tarea programada por falta de actividad en el repositorio (lo hace a los 60 dias).
+      - name: Registrar la actualizacion
+        if: github.event_name != 'push'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add datos/historial.json
+          git commit -m "Datos publicos al $(date -u +%d/%m/%Y)" || exit 0
+          git pull --rebase
+          git push
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+
+  pagina:
+    name: Publicar la pagina
+    needs: base
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
+
+  windows:
+    name: Armar el programa para Windows
+    needs: base
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: base
+          path: web/data
+
+      - run: npm ci
+
+      # Version por mes, para que el instalador reemplace a la version anterior.
+      - name: Version
+        run: npm pkg set version="1.$(date -u +%Y%m).${{ github.run_number }}"
+
+      - name: Empaquetar
+        run: npx electron-builder --win portable nsis --publish never
+
+      - name: Publicar la version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          corte=$(node -e "const s=require('fs').readFileSync('web/data/base-meta.js','utf8');const i=s.indexOf('RC_BASE_META = ')+15;console.log(JSON.parse(s.slice(i).trim().replace(/;$/,'')).corte)")
+          tag="datos-${corte}-${{ github.run_number }}"
+          gh release create "$tag" \
+            dist/Rastreador-Contrataciones-portable.exe \
+            dist/Rastreador-Contrataciones-instalador.exe \
+            --title "Datos al ${corte}" \
+            --notes "Programa para Windows con los datos publicos al ${corte}. El portable se abre sin instalar; el instalador lo agrega al menu de inicio. Las dos versiones buscan solas la base nueva el 1 de cada mes." \
+            --latest

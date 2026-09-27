@@ -1,0 +1,7 @@
+node_modules/
+dist/
+# Archivos publicos bajados por tools/construir-base.js (~370 MB): se vuelven a bajar.
+datos/descargas/
+# La base se arma con `npm run base` (localmente o en GitHub Actions); no se versiona.
+web/data/base.js
+web/data/base-meta.js
