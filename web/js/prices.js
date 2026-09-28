@@ -38,8 +38,10 @@
       const unit = m[2];
       for (const [re, dim, f] of UNITS) if (re.test(unit)) { add(dim, parseFloat(m[1]) * f); break; }
     }
-    // Envases: "x 16", "x16", "caja x 16", "pack de 6".
-    for (const m of s.matchAll(/(?:\bx|\bpor|\bpack de|\bcaja de|\bcaja x)\s*(\d+)\b/g)) add('n', parseFloat(m[1]));
+    // Envases: "x 16", "x16", "caja x 16", "pack de 6". "x 60 ml" no son 60 unidades: es el contenido.
+    for (const m of s.matchAll(/(?:\bx|\bpor|\bpack de|\bcaja de|\bcaja x)\s*(\d+)\b(?!\s*(?:[.,]\d|"|(?:mg|mcg|ml|cc|l|lt|lts|litros?|g|gr|grs|gramos?|kg|kgs|kilos?|ui|gb|tb|mb|cm|mm|m|mts?|metros?)\b))/g)) add('n', parseFloat(m[1]));
+    for (const m of s.matchAll(/(?:\b(\d+)\s*)?\bdocenas?\b/g)) add('n', 12 * (m[1] ? parseFloat(m[1]) : 1));
+    if (/\bmaples?\b/.test(s)) add('n', 30);
     return out;
   }
   // Sinonimos frecuentes en compras de informatica y salud: se unifican antes de comparar.
@@ -53,10 +55,14 @@
     [/\bamp\b|\bampollas?\b/g, 'ampolla'],
     [/\bgas ?oil\b|\bdiesel\b/g, 'gasoil']
   ];
+  // Palabras que no distinguen productos, incluidas las de unidad y envase ("x 1 kg", "paquete").
   const STOP = new Set(('de del la las los el y e en para con por x a al sin tipo marca modelo unidad unidades un una ' +
-    'cada c u uds caja cajas envase presentacion articulo producto provision adquisicion compra').split(' '));
+    'cada c u uds und caja cajas envase envases presentacion articulo producto provision adquisicion compra ' +
+    'kg kgs kilo kilos g gr grs gramo gramos l lt lts litro litros cc ml paquete paquetes botella botellas bolsa bolsas ' +
+    'lata latas pote potes frasco frascos docena docenas maple maples entre').split(' '));
   function tokens(text) {
     let s = RC.fold(text || '').replace(/(\d),(\d)/g, '$1.$2')
+      .replace(/\b(?:x|por|pack de|caja de|caja x)\s*\d+(?:\.\d+)?\b/g, ' ')  // "x 30": el envase, no el producto
       .replace(/(\d+(?:\.\d+)?)\s*("|[a-zµ]+\d*)/g, ' ');           // las cantidades van aparte
     for (const [re, to] of SYN) s = s.replace(re, to);
     const out = new Set();
@@ -82,13 +88,32 @@
     if (/^(l|lt|lts|litros?)$/.test(u)) return { dim: 'ml', v: 1000 };
     if (/^(kg|kilos?)$/.test(u)) return { dim: 'g', v: 1000 };
     if (/^(m3|metros? cubicos?)$/.test(u)) return { dim: 'm3', v: 1 };
-    // Sin unidad explicita: el contenido de la descripcion ("aceite 1.5 l") es el envase.
-    if (!u || /^(unidad|u|un|unid|uds?|c u|envase|botella|bidon|paquete)$/.test(u)) {
-      if (md.ml && !md.mg) return { dim: 'ml', v: Math.max(...md.ml) };
-      if (md.g && !md.mg) return { dim: 'g', v: Math.max(...md.g) };
+    // Sin unidad explicita: el contenido de la descripcion ("aceite 1.5 l", "jarabe 125 mg/5 ml
+    // x 60 ml") es el envase. Lo que va despues de una barra es concentracion, no contenido.
+    if (!u || /^(unidad|u|un|unid|uds?|c u|envase|botella|bidon|paquete|frasco|pomo|tubo|sachet|lata|pote|bolsa)$/.test(u)) {
+      const pack = contenido(desc);
+      if (pack.ml) return { dim: 'ml', v: pack.ml };
+      if (pack.g) return { dim: 'g', v: pack.g };
     }
     return { dim: 'n', v: 1 };
   }
+  function contenido(text) {
+    const s = RC.fold(text || '').replace(/(\d),(\d)/g, '$1.$2');
+    const out = {};
+    for (const m of s.matchAll(/(\/\s*)?(\d+(?:\.\d+)?)\s*(ml|cc|l|lt|lts|litros?|g|gr|grs|gramos?|kg|kgs|kilos?)\b/g)) {
+      if (m[1]) continue;
+      const v = parseFloat(m[2]), u = m[3];
+      const [dim, f] = /^(ml|cc)$/.test(u) ? ['ml', 1] : /^(l|lt|lts|litros?)$/.test(u) ? ['ml', 1000] : /^(kg|kgs|kilos?)$/.test(u) ? ['g', 1000] : ['g', 1];
+      out[dim] = Math.max(out[dim] || 0, v * f);
+    }
+    return out;
+  }
+
+  /* Medidas que identifican al producto (500 mg, 5 ml de una jeringa, 256 GB): las de la
+     descripcion, sin el contenido del envase ("x 90 ml", "x 1 kg"), que solo sirve para
+     llevar el precio a la unidad. */
+  const identidad = (desc) => measures(RC.fold(desc || '').replace(/(\d),(\d)/g, '$1.$2')
+    .replace(/\bx\s*\d+(?:\.\d+)?\s*(?:ml|cc|l|lt|lts|litros?|g|gr|grs|gramos?|kg|kgs|kilos?)\b/g, ' '));
 
   // ── indice de productos de mercado ──────────────────────
   let cache = null;
@@ -97,7 +122,7 @@
     if (cache && cache.ver === DB.ver && cache.nm === DB.mkt.length) return cache;
     const prods = DB.mkt.map((p) => {
       const text = `${p.desc} ; ${p.unit}`;   // separados: "grado 2" + "litro" no son 2 litros
-      return { p, tok: tokens(text), mea: measures(text), scale: scaleOf(p.desc, p.unit), marca: RC.norm(p.marca), code: String(p.codigo || '').replace(/\D/g, '') };
+      return { p, tok: tokens(text), mea: identidad(p.desc), scale: scaleOf(p.desc, p.unit), marca: RC.norm(p.marca), code: String(p.codigo || '').replace(/\D/g, '') };
     });
     const df = new Map(), post = new Map(), byCode = new Map();
     prods.forEach((q, j) => {
@@ -112,8 +137,10 @@
     return cache;
   }
 
+  // Masa en una sola escala para comparar dosis: 1 g son 1000 mg (el paracetamol de 1 g no es el de 500 mg).
+  const conMasa = (m) => (m.mg || m.g) ? Object.assign({}, m, { mg: (m.mg || []).concat((m.g || []).map((x) => x * 1000)), g: null }) : m;
   function score(it, q, idf) {
-    if (it.code.length >= 8 && it.code === q.code) return { s: 1, conflict: false };
+    if (it.code.length >= 8 && it.code === q.code) return { s: 1, r: 2, conflict: false };
     const w = (t) => idf.get(t) || Math.log(2);
     const B = new Set(q.tok);
     let inter = 0, sa = 0, sb = 0;
@@ -122,14 +149,17 @@
     if (!sa || !sb || !inter) return { s: 0, conflict: false };
     const prec = inter / sb, rec = inter / sa;
     let s = 2 * prec * rec / (prec + rec), conflict = false;
+    const ma = conMasa(it.mea), mb = conMasa(q.mea);
     for (const dim of IDENTITY) {
-      const a = it.mea[dim], b = q.mea[dim];
+      const a = ma[dim], b = mb[dim];
       if (!a || !b) continue;
       if (a.some((x) => b.some((y) => Math.abs(x - y) <= 0.03 * Math.max(x, y)))) s += 0.08;
       else { s *= 0.45; conflict = true; }
     }
     if (it.marca && q.marca && it.marca === q.marca) s += 0.05;
-    return { s: Math.min(1, s), conflict };
+    // `r` sin tope ordena a los candidatos: dos productos con todas las palabras en comun
+    // se desempatan por las medidas que coinciden.
+    return { s: Math.min(1, s), r: s, conflict };
   }
 
   // ── IPC y montos ────────────────────────────────────────
@@ -159,7 +189,7 @@
     const rows = [];
     for (const t of DB.items) {
       const text = `${t.desc} ; ${t.unit}`;
-      const it = { tok: tokens(text), mea: measures(text), marca: RC.norm(t.marca), code: String(t.codigo || '').replace(/\D/g, '') };
+      const it = { tok: tokens(text), mea: identidad(t.desc), marca: RC.norm(t.marca), code: String(t.codigo || '').replace(/\D/g, '') };
       const scale = scaleOf(t.desc, t.unit);
       // candidatos: productos que comparten alguna palabra poco comun, o el mismo codigo
       const cand = new Map();
@@ -172,7 +202,7 @@
       }
       const top = [...cand].sort((a, b) => b[1] - a[1]).slice(0, 150)
         .map(([j]) => Object.assign({ j }, score(it, X.prods[j], X.idf)))
-        .filter((c) => c.s > 0.2).sort((a, b) => b.s - a.s).slice(0, 5);
+        .filter((c) => c.s > 0.2).sort((a, b) => b.r - a.r).slice(0, 5);
       const row = { t, scale, cands: top, m: -1, s: 0, estado: 'sin-par', nota: '' };
       const ov = DB.eqv.get(t.key);
       if (ov && ov.estado === 'rechazado') row.estado = 'rechazado';
@@ -184,6 +214,13 @@
         else if (b.s >= 0.4) { row.estado = 'pendiente'; row.nota = !sameDim ? 'Las unidades no coinciden: revisá si el precio de mercado es por la misma cantidad.' : b.conflict ? 'Las cantidades de la descripción no coinciden.' : ''; }
       }
       if (row.m >= 0) reference(row, X, iva, O, S);
+      // Seis veces arriba o abajo suele ser otra unidad (una caja contra un comprimido), no un
+      // precio: el emparejamiento automatico pasa a revision.
+      const k = row.ref > 0 ? row.unitPaid / row.ref : 1;
+      if (row.estado === 'auto' && (k > 6 || k < 1 / 6)) {
+        Object.assign(row, { m: -1, s: 0, ref: 0, diff: NaN, excessARS: 0, paidARS: 0, refARS: 0, estado: 'pendiente',
+          nota: `El precio pagado es ${k > 6 ? `${Math.round(k)} veces` : `la ${Math.round(1 / k)}.ª parte de`} la referencia: revisá que sea la misma unidad (por ejemplo, caja contra comprimido).` });
+      }
       rows.push(row);
     }
     X.rows = rows; X.sig = sig;
@@ -235,6 +272,9 @@
   const disp = (ars, year) => RC.toDisplay(ars / RC.usdRate(year), year);
   const yearOf = (t) => isFinite(t.year) ? t.year : new Date().getUTCFullYear();
 
+  // Lo mismo que dispara la alerta: sobre el umbral, emparejado seguro y con 3 precios o mas.
+  const senalado = (r, thr) => r.ref > 0 && r.diff >= thr && r.n >= 3 && (r.estado === 'auto' || r.estado === 'confirmado');
+
   function summary(V) {
     const X = analyze(), S = RC.settings, thr = (S.precioUmbral || 50) / 100;
     const rows = X.rows.filter((r) => inView(r.t, V));
@@ -243,7 +283,7 @@
       items: rows.length, comparados: cmp.length,
       pendientes: rows.filter((r) => r.estado === 'pendiente').length,
       sinPar: rows.filter((r) => r.estado === 'sin-par').length,
-      arriba: cmp.filter((r) => r.diff >= thr).length,
+      arriba: cmp.filter((r) => senalado(r, thr)).length,
       exceso: cmp.reduce((s, r) => s + disp(r.excessARS, yearOf(r.t)), 0),
       pagado: cmp.reduce((s, r) => s + disp(r.paidARS, yearOf(r.t)), 0),
       productos: RC.model.DB.mkt.length, observaciones: RC.model.DB.obs.prod.length
@@ -263,7 +303,7 @@
       if (!a) acc.set(id, a = { id, exceso: 0, pagado: 0, ref: 0, n: 0, arriba: 0 });
       const y = yearOf(r.t);
       a.exceso += disp(r.excessARS, y); a.pagado += disp(r.paidARS, y); a.ref += disp(r.refARS, y);
-      a.n++; if (r.diff >= thr) a.arriba++;
+      a.n++; if (senalado(r, thr)) a.arriba++;
     }
     return [...acc.values()].map((a) => Object.assign(a, { diff: a.ref > 0 ? a.pagado / a.ref - 1 : NaN }))
       .sort((a, b) => b.exceso - a.exceso);
@@ -274,7 +314,8 @@
     const X = analyze(), S = RC.settings, DB = RC.model.DB, thr = (S.precioUmbral || 50) / 100;
     const out = [];
     for (const r of X.rows) {
-      if (!(r.ref > 0) || r.diff < thr || !inView(r.t, V) || (r.estado !== 'auto' && r.estado !== 'confirmado')) continue;
+      // Con menos de 3 precios de referencia la comparacion se muestra, pero no alcanza para una alerta.
+      if (!(r.ref > 0) || r.diff < thr || r.n < 3 || !inView(r.t, V) || (r.estado !== 'auto' && r.estado !== 'confirmado')) continue;
       const t = r.t, y = yearOf(t), q = DB.mkt[r.m];
       const org = t.org >= 0 ? DB.orgs[t.org].name : 'organismo sin identificar';
       const sev = RC.clamp(0.3 + 0.35 * Math.log2(1 + r.diff) / 2 + (r.estado === 'confirmado' ? 0.15 : 0) + Math.min(0.2, Math.log10(1 + disp(r.excessARS, y) / 1000) / 15), 0, 1);
@@ -308,11 +349,11 @@
   function searchProducts(text, limit) {
     const X = index(), tk = tokens(text);
     if (!tk.length) return [];
-    const it = { tok: tk, mea: measures(text), marca: '', code: String(text).replace(/\D/g, '') };
+    const it = { tok: tk, mea: identidad(text), marca: '', code: String(text).replace(/\D/g, '') };
     const cand = new Map();
     for (const t of tk) for (const j of (X.post.get(t) || []).slice(0, 4000)) cand.set(j, (cand.get(j) || 0) + (X.idf.get(t) || 0));
     return [...cand].sort((a, b) => b[1] - a[1]).slice(0, 200).map(([j]) => Object.assign({ j }, score(it, X.prods[j], X.idf)))
-      .sort((a, b) => b.s - a.s).slice(0, limit || 8);
+      .sort((a, b) => b.r - a.r).slice(0, limit || 8);
   }
 
   RC.prices = { ventanaTxt, analyze, summary, ranking, alerts, series, searchProducts, measures, tokens, scaleOf, ipcFactor, disp, inView };

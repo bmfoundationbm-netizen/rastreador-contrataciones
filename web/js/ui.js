@@ -837,11 +837,11 @@
   }
   function itemRow(r) {
     const DB = RC.model.DB, t = r.t, thr = RC.settings.precioUmbral / 100;
-    const lvl = r.diff >= thr ? RC.alerts.level(Math.min(1, 0.3 + r.diff / 3)) : null;
+    const lvl = r.diff >= thr && r.n >= 3 ? RC.alerts.level(Math.min(1, 0.3 + r.diff / 3)) : null;   // igual que la alerta
     const pu = perUnit(r.scale);
     return `<div class="rowi ${lvl ? 'flag' : ''}" data-ref="item:${t.i}" ${lvl ? `style="--c:${lvl.color}"` : ''}><span class="rn">${esc(t.desc)}</span>` +
       `<span class="rv">${r.diff >= 0 ? '+' : ''}${RC.pct(r.diff)}</span>` +
-      `<span class="rs">${t.org >= 0 ? esc(DB.orgs[t.org].name) + ' · ' : ''}${RC.fmtDate(t.date)} · pagado ${RC.moneyNative(r.unitPaid * pu.k, 'ARS')} contra ${RC.moneyNative(r.ref * pu.k, 'ARS')} ${pu.txt}</span></div>`;
+      `<span class="rs">${t.org >= 0 ? esc(DB.orgs[t.org].name) + ' · ' : ''}${RC.fmtDate(t.date)} · pagado ${RC.moneyNative(r.unitPaid * pu.k, 'ARS')} contra ${RC.moneyNative(r.ref * pu.k, 'ARS')} ${pu.txt}${r.n < 3 ? ` · referencia de ${r.n === 1 ? 'un solo precio' : 'solo 2 precios'}` : ''}</span></div>`;
   }
   function reviewCard(r, n, search) {
     const DB = RC.model.DB, t = r.t;
@@ -937,7 +937,7 @@
     const DB = RC.model.DB, X = RC.prices.analyze(), p = DB.mkt[m];
     const rows = (X.byProd.get(m) || []).map((q) => X.rows[q]).filter((r) => r.ref > 0).sort((a, b) => b.diff - a.diff);
     const obsN = (X.obsBy.get(m) || []).length;
-    const origen = { usuario: 'cargado en este equipo', base: 'aporte aprobado', sepa: 'Precios Claros', surtidor: 'precios en surtidor' }[p.origen] || p.origen;
+    const origen = { usuario: 'cargado en este equipo', base: 'incluido en la base', sepa: 'Precios Claros', surtidor: 'precios en surtidor' }[p.origen] || p.origen;
     return kindHead('prod') + `<h2 class="dtitle">${esc(p.desc)}</h2>` +
       `<div class="dsub">${p.unit ? `${esc(p.unit)} · ` : ''}${RC.int(obsN)} precios de mercado · ${esc(origen)}${p.codigo ? ` · <span class="mono">${esc(p.codigo)}</span>` : ''}</div>` +
       priceChart(m, rows) +
@@ -956,7 +956,8 @@
     if (pts.length < 2) return '';
     chartPts = pts;
     const W = 340, H = 150, padL = 58, padB = 18, padT = 8;
-    const x0 = Math.min(...pts.map((d) => d.x)), x1 = Math.max(...pts.map((d) => d.x)) + 1;
+    const xa = Math.min(...pts.map((d) => d.x)), xb = Math.max(...pts.map((d) => d.x)), pad = Math.max(15 * RC.DAY, (xb - xa) * 0.02);
+    const x0 = xa - pad, x1 = xb + pad;
     const ymax = Math.max(...pts.map((d) => d.y)) * 1.08;
     const X_ = (t) => padL + (W - padL - 8) * (t - x0) / (x1 - x0), Y_ = (v) => padT + (H - padT - padB) * (1 - v / ymax);
     let g = '';
@@ -964,8 +965,20 @@
       const yy = Y_(ymax * f);
       g += `<line x1="${padL}" x2="${W}" y1="${yy}" y2="${yy}" stroke="#1f1f27"/><text x="${padL - 5}" y="${yy + 3}" fill="#8f8f9c" font-size="9.5" text-anchor="end" font-family="IBM Plex Mono, monospace">${RC.compact(ymax * f)}</text>`;
     }
-    const y0 = new Date(x0).getUTCFullYear(), y1 = new Date(x1).getUTCFullYear(), step = Math.max(1, Math.ceil((y1 - y0 + 1) / 6));
-    for (let y = y0; y <= y1; y += step) { const t = Date.UTC(y, 0, 1); if (t >= x0 && t <= x1) g += `<text x="${X_(t)}" y="${H - 4}" fill="#8f8f9c" font-size="9.5" text-anchor="middle" font-family="IBM Plex Mono, monospace">${y}</text>`; }
+    const tick = (t, txt) => `<text x="${X_(t)}" y="${H - 4}" fill="#8f8f9c" font-size="9.5" text-anchor="middle" font-family="IBM Plex Mono, monospace">${txt}</text>`;
+    const y0 = new Date(x0).getUTCFullYear(), y1 = new Date(x1).getUTCFullYear();
+    if (x1 - x0 > 2 * 365 * RC.DAY) {
+      const step = Math.max(1, Math.ceil((y1 - y0 + 1) / 6));
+      for (let y = y0; y <= y1; y += step) { const t = Date.UTC(y, 0, 1); if (t >= x0 && t <= x1) g += tick(t, y); }
+    } else {
+      // Pocos meses (por ejemplo, una sola lista de precios): rotulos por mes.
+      const M = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
+      const d0 = new Date(x0), months = (y1 - y0) * 12 + new Date(x1).getUTCMonth() - d0.getUTCMonth() + 1, step = Math.max(1, Math.ceil(months / 5));
+      for (let k = 0; k <= months; k += step) {
+        const t = Date.UTC(y0, d0.getUTCMonth() + k, 1), d = new Date(t);
+        if (t >= x0 && t <= x1) g += tick(t, `${M[d.getUTCMonth()]} ${String(d.getUTCFullYear()).slice(2)}`);
+      }
+    }
     pts.forEach((d, n) => {
       g += d.s === 'm'
         ? `<circle cx="${X_(d.x).toFixed(1)}" cy="${Y_(d.y).toFixed(1)}" r="4" fill="#3987e5" stroke="#0f0f13" stroke-width="2" data-pt="${n}"/>`

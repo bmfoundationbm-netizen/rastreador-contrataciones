@@ -38,6 +38,10 @@ const SEPA = 'precios-claros-base-sepa', SEPA_MAY = 'precios-claros-sepa-mayoris
 const APORTES = path.join(ROOT, 'datos', 'aportes');
 const MERCADO = path.join(ROOT, 'datos', 'mercado');
 const APORTE_TIPOS = ['items', 'mercado', 'equivalencias'];
+const SSPM = 'https://infra.datos.gob.ar/catalog/sspm/dataset';
+const INDEC_GBA = `${SSPM}/101/distribution/101.9/download/precios-al-consumidor-conjunto-alimentos-bebidas-base-diciembre-2016-mensual.csv`;
+const INDEC_REG = `${SSPM}/145/distribution/145.13/download/precios-consumidor-canasta-ipc-regiones.csv`;
+const ADAPTAR = require('./precios-publicos');
 
 /* Fuentes en el orden en que se importan (el registro va al final: se cruza contra los
    proveedores y oferentes ya cargados). `complemento`: solo agrega documentos que no esten. */
@@ -61,6 +65,17 @@ const FUENTES = [
   // Si su servidor no responde, la base se arma igual.
   { grupo: 'Precios Claros (supermercados)', ckan: [GOB, SEPA, /^Mi[eé]rcoles$/i], opcional: true, sepa: true },
   { grupo: 'Precios Claros mayorista', ckan: [GOB, SEPA_MAY, /^Mi[eé]rcoles$/i], opcional: true, sepa: true, archivoPre: 'mayorista-' },
+  // Medicamentos: precio de venta al publico de cada marca y presentacion. PAMI publica solo
+  // la lista vigente: la lista convertida se guarda cada mes en datos/mercado.
+  { grupo: 'Medicamentos: precios de venta al público (PAMI)', ckan: [GOB, 'medicamentos-para-entidades', /medicamentos para entidades/i],
+    adaptar: 'pami', mensual: 'pami-medicamentos', opcional: true },
+  // Alimentos, limpieza e higiene: precios promedio del INDEC (series del Ministerio de Economia).
+  { grupo: 'INDEC: precios promedio al consumidor por región', url: INDEC_REG, archivo: 'indec-precios-regiones.csv',
+    nombre: 'Precios promedio de 14 productos en 6 regiones (mensual)', catalogo: 'https://datos.gob.ar/series/api/series/?ids=348.1_GBA_PAN_FR_KG__18',
+    siempre: true, opcional: true, adaptar: 'indec-regiones' },
+  { grupo: 'INDEC: precios promedio al consumidor en GBA', url: INDEC_GBA, archivo: 'indec-precios-gba.csv',
+    nombre: 'Precios promedio de 59 productos en GBA (mensual)', catalogo: 'https://datos.gob.ar/series/api/series/?ids=105.1_I2AG_2016_M_23',
+    siempre: true, opcional: true, adaptar: 'indec-gba' },
   { grupo: 'Precios de mercado guardados mes a mes', dir: MERCADO },
   // Aportes aprobados (items comprados, precios y equivalencias): despues de los contratos, antes del registro.
   { grupo: 'Aportes aprobados', dir: APORTES },
@@ -172,11 +187,15 @@ async function asFile(p, name) {
       continue;
     }
     const t = Date.now();
-    let st = null, err = null;
+    let st = null, err = null, conv = null;
+    // Fuentes con formato propio: se pasan antes al formato de precios de mercado de la app.
+    if (it.F.adaptar) {
+      try { conv = adaptar(it, items); } catch (e) { err = e; }
+    }
     const ui = { detected() {}, start() {}, progress() {}, failed(_s, e) { err = e; }, done(_s, s) { st = s; } };
-    await RC.model.importFiles([await asFile(it.dest, it.file)], ui, null, { complemento: !!it.F.complemento, base: true, fechaDatos: it.fechaDatos,
-      solo: it.F.dir === APORTES ? APORTE_TIPOS : null });
-    const res = st ? resumen(st) : `error: ${err && err.message}`;
+    if (!err) await RC.model.importFiles([await asFile(conv ? conv.path : it.dest, conv ? conv.file : it.file)], ui, null,
+      { complemento: !!it.F.complemento, base: true, fechaDatos: it.fechaDatos, solo: it.F.dir === APORTES ? APORTE_TIPOS : null });
+    const res = st ? (conv ? `${conv.nota}; ${resumen(st)}` : resumen(st)) : `error: ${err && err.message}`;
     log(`  ${err ? '✗' : '✓'} ${it.nombre.padEnd(62)} ${((Date.now() - t) / 1000).toFixed(1).padStart(5)} s  ${res}`);
     fuentes.push({ grupo: it.F.grupo, nombre: it.nombre, url: it.url, catalogo: it.catalogo, archivo: it.file, bytes: it.bytes,
       tipo: st ? st.tipo : null, resultado: res, error: err ? err.message : null });
@@ -240,6 +259,28 @@ async function asFile(p, name) {
   log(`Listo en ${((Date.now() - t0) / 1000).toFixed(0)} s.`);
   process.exit(0);
 })().catch((e) => { console.error('\nNo se pudo construir la base:', e.message); process.exit(1); });
+
+/* Convierte una fuente al formato de precios de mercado (tools/precios-publicos.js). Las de
+   `mensual` (solo publican la lista vigente) se guardan ademas en datos/mercado, una por mes,
+   en GitHub Actions o con --guardar-mercado: asi se arma la historia. */
+function adaptar(it, items) {
+  const dir = path.join(DL, 'convertidos');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = `${path.basename(it.file, path.extname(it.file))}-convertido.csv`, dest = path.join(dir, file);
+  const otro = (tipo) => { const o = items.find((x) => x.F.adaptar === tipo && x.dest); return o ? o.dest : null; };
+  let r;
+  if (it.F.adaptar === 'pami') r = ADAPTAR.adaptarPami(it.dest, dest);
+  else if (it.F.adaptar === 'indec-regiones') r = ADAPTAR.adaptarIndecRegiones(it.dest, dest);
+  else if (it.F.adaptar === 'indec-gba') r = ADAPTAR.adaptarIndecGba(it.dest, dest, otro('indec-regiones'));
+  else throw new Error(`adaptador desconocido: ${it.F.adaptar}`);
+  if (it.F.mensual && r.fecha && (process.env.GITHUB_ACTIONS || process.argv.includes('--guardar-mercado'))) {
+    fs.mkdirSync(MERCADO, { recursive: true });
+    const guardado = path.join(MERCADO, `${it.F.mensual}-${r.fecha.slice(0, 7)}.csv`);
+    fs.copyFileSync(dest, guardado);
+    log(`  Lista del mes guardada: datos/mercado/${path.basename(guardado)}`);
+  }
+  return { path: dest, file, nota: r.nota };
+}
 
 function isFreshToday(p) { return Date.now() - fs.statSync(p).mtimeMs < 20 * 3600 * 1000; }
 function repoUrl() { const p = publicacion(); return p ? p.repo : ''; }

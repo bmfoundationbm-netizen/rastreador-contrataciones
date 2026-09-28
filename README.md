@@ -82,6 +82,8 @@ sola la primera vez que se abre (~4 s). Corte actual: **27/09/2026**.
 | Presupuesto abierto, crédito anual 2015-2026 | presupuestoabierto.gob.ar | 1 493 organismo-años: ministerio, crédito, devengado, unidades ejecutoras |
 | IPC nacional, nivel general (INDEC) | apis.datos.gob.ar › Series de tiempo | 117 meses (dic-2016 a hoy), para ajustar precios por inflación |
 | Precios en surtidor, histórico | datos.gob.ar › Secretaría de Energía | 590 precios: mediana nacional de cada mes de nafta súper y premium, gasoil grado 2 y 3, y GNC |
+| Listado de precios de medicamentos (PAMI) | datos.gob.ar › PAMI | precio de venta al público de cada marca: 5 828 precios de 1 349 medicamentos genéricos (droga, concentración y forma), por comprimido, cápsula, ampolla, ml o g |
+| Precios promedio al consumidor (INDEC) | datos.gob.ar › Series de tiempo (Ministerio de Economía) | 59 productos de almacén, carnes, verdulería, limpieza e higiene en GBA desde abril de 2016, y 14 de ellos en las otras cinco regiones desde junio de 2017: unos 15 000 precios mensuales |
 | Precios Claros (SEPA), minorista y mayorista | datos.gob.ar › Secretaría de Comercio | **no disponible**: su servidor no responde (ver [Precios](#precios)) |
 
 En total: **156 151 contratos**, **9 824 empresas**, **224 organismos** de **24
@@ -245,7 +247,8 @@ jurídico que presta el domicilio (en Buenos Aires hay direcciones con más de 8
 
 **Precio sobre la referencia.** Un ítem comprado cuyo precio unitario supera en
 50 % o más al precio de referencia del mismo producto. Solo cuentan los
-emparejamientos automáticos seguros o confirmados a mano. Ver [Precios](#precios).
+emparejamientos automáticos seguros o confirmados a mano, y la referencia tiene que
+tener al menos 3 precios. Ver [Precios](#precios).
 
 **Exportar CSV** baja las alertas visibles con su explicación, organismos,
 empresas, CUIT y contratos.
@@ -264,9 +267,28 @@ armada a partir de cuadros comparativos, órdenes de compra o expedientes.
 Cada ítem se une a su contrato por número de orden de compra o de proceso y toma de
 ahí el organismo y la empresa.
 
-**De dónde salen los precios de mercado.**
-- Incluidos en la base: **combustibles** (Secretaría de Energía, mediana nacional
-  de cada mes) y el **IPC** del INDEC para el ajuste por inflación.
+**De dónde salen los precios de mercado.** Solo de fuentes públicas oficiales o de lo
+que cargue cada uno: la app no estima precios.
+- **Medicamentos** (PAMI): el listado de precios de venta al público de cada marca y
+  presentación. Se agrupa por droga, concentración y forma (por ejemplo,
+  *Enalapril 10 mg comprimidos*) y cada marca queda como un precio de ese producto,
+  por comprimido, cápsula, ampolla, ml o g. La referencia es la mediana entre marcas.
+  Es precio de farmacia al público: una compra del Estado por volumen debería estar
+  por debajo, así que pagar por encima es una señal fuerte. Quedan afuera las
+  presentaciones sin concentración o con una forma que no se puede llevar a una
+  unidad (aerosoles, kits, tiras reactivas). PAMI publica solo la lista vigente: la
+  tarea mensual guarda la lista convertida en `datos/mercado/pami-medicamentos-AAAA-MM.csv`
+  y así se arma la historia, desde septiembre de 2026.
+- **Alimentos, limpieza e higiene** (INDEC): precios promedio al consumidor de 59
+  productos en GBA desde 2016 (pan, harina, arroz, fideos, carnes, pollo, merluza,
+  lácteos, huevos, frutas y verduras, aceite, azúcar, yerba, café, bebidas,
+  lavandina, detergente, jabones, champú, pañales…) y de 14 de ellos en las otras
+  cinco regiones desde 2017. Vienen de los CSV de series de tiempo del Ministerio de
+  Economía; la presentación de cada uno (botella de 1,5 l, paquete de 500 g,
+  docena) sale del cuadro del INDEC.
+- **Combustibles** (Secretaría de Energía): mediana nacional de cada mes de nafta
+  súper y premium, gasoil grado 2 y 3, y GNC.
+- El **IPC** del INDEC, para el ajuste por inflación.
 - **Precios Claros** (SEPA): el script los intenta bajar todos los meses, pero hoy
   su servidor (`datos.produccion.gob.ar`) no responde, así que la base se arma sin
   ellos y **Fuentes** lo muestra. Como Precios Claros publica solo la última semana,
@@ -274,6 +296,10 @@ ahí el organismo y la empresa.
   `datos/mercado/`, y así se irá armando la historia.
 - Los que cargue cada uno: listas de precios mayoristas, relevamientos,
   cotizaciones, con la planilla modelo de precios de mercado.
+- **Informática, insumos médicos, papelería, uniformes:** no hay una fuente pública
+  oficial con precios. La API de Mercado Libre pide una cuenta de desarrollador y el
+  INDEC no releva esos productos. Por ahora dependen de lo que se cargue o se apruebe
+  como aporte.
 
 **Cómo se empareja.** Por descripción: palabras en común (las raras pesan más),
 sinónimos frecuentes ("computadora portátil" = notebook, "gas oil" = gasoil,
@@ -284,6 +310,9 @@ medidas en conflicto y con la misma clase de unidad, el emparejamiento es
 **automático**. Entre 40 y 72 queda **para revisar**. En **Precios › Revisar** se
 elige el producto correcto o *Ninguno*, y en **Sin par** se busca uno a mano. Lo
 confirmado vale para todos los ítems con la misma descripción y queda guardado.
+Si el precio pagado da más de 6 veces la referencia (o menos de la sexta parte), casi
+siempre es otra unidad (una caja contra un comprimido): el emparejamiento pasa a
+**Revisar** en lugar de disparar una alerta.
 
 **Cómo se ajusta.**
 - **Unidad:** los dos precios se llevan a la misma unidad comparable (por
@@ -373,6 +402,7 @@ antes de importar datos reales.
 ```
 tools/construir-base.js  arma la base incluida con los datos publicos (npm run base)
 tools/validar-aporte.js  revisa un aporte de precios antes de sumarlo
+tools/precios-publicos.js  convierte PAMI e INDEC al formato de precios de mercado
 datos/descargas/     archivos publicos bajados por el script (no van en la app empaquetada)
 datos/mercado/       resumen mensual de Precios Claros (esa fuente solo publica la ultima semana)
 datos/aportes/       aportes de precios aprobados; entran en la base el 1 de cada mes
@@ -447,6 +477,18 @@ Las librerías van vendorizadas, como en Umbra: la app funciona sin red.
 - **La Secretaría de Energía no sirve https** (redirige a http): el histórico de
   surtidor se baja por http, y se lo resume a la mediana nacional de cada mes y
   producto (de 3,4 millones de registros quedan 590 precios).
+- **Los CSV de precios promedio del Ministerio de Economía tienen columnas mal
+  rotuladas algunos meses:** de enero a agosto de 2026 *jabón de tocador* y
+  *desodorante* venían invertidos, y en febrero de 2026 *lavandina* y *detergente*.
+  Se detecta con las series regionales, que traen el producto y la presentación en el
+  nombre y repiten los valores de GBA: si un mes no coinciden, se intercambian. Con
+  eso, 7 292 de los 7 342 precios de GBA coinciden con el cuadro original del INDEC
+  (los otros 50 difieren en centavos, por redondeo, en marzo de 2024).
+- **"x 60 ml" no son 60 unidades.** Un jarabe "x 60 ml" se compara por ml, una caja
+  "x 30" por comprimido; lo que va después de una barra ("125 mg/5 ml") es
+  concentración, no contenido. *Docena* son 12 y *maple* 30.
+- **El listado de PAMI trae acentos perdidos** en algunos laboratorios ("Bag¿"): el
+  laboratorio se muestra solo si llegó entero; la marca, siempre.
 - **Una hoja de Excel con solo el encabezado** se leía mal (sin salto de línea no
   había una fila completa): se agrega el salto al final.
 - **Los IDs de alerta salen del contenido** (tipo + a quién señala), así una alerta
@@ -464,7 +506,11 @@ Las librerías van vendorizadas, como en Umbra: la app funciona sin red.
 - Los domicilios de la IGJ no traen CUIT (se enlazan por número correlativo) y no
   se cruzan; el registro nacional ya trae el domicilio legal.
 - La fecha de preinscripción del SIPRO no es la de constitución y no se usa.
-- Precios Claros no responde; mientras tanto, los precios de mercado de informática y
-  medicamentos dependen de lo que se cargue o se apruebe como aporte.
+- Precios Claros no responde, y no hay fuente pública de precios de informática,
+  insumos médicos ni papelería: esos rubros dependen de lo que se cargue o se apruebe
+  como aporte.
+- Los precios de medicamentos tienen historia recién desde septiembre de 2026: para
+  compras anteriores la referencia es la lista actual llevada hacia atrás con el IPC
+  general, que no sigue exactamente a los medicamentos.
 - Los ítems con precio en dólares se pasan a pesos con el promedio anual del tipo de
   cambio, no con el del día de la compra.
