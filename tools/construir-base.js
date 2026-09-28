@@ -312,7 +312,7 @@ function resumen(st) {
   if (st.tipo === 'convocatorias') return `${n(st.aceptados)} procesos`;
   if (st.tipo === 'ipc') return `${n(st.aceptados)} meses`;
   if (st.tipo === 'surtidor') return `${n(st.rows)} registros, ${n(st.aceptados)} precios mensuales`;
-  if (st.tipo === 'mercado') return `${n(st.aceptados)} precios de ${n(st.rows)} filas`;
+  if (st.tipo === 'mercado') return `${n(st.aceptados)} precios de ${n(st.rows)} filas${st.duplicados ? ` (${n(st.duplicados)} ya estaban, de la lista vigente)` : ''}`;
   if (st.tipo === 'items') return `${n(st.aceptados)} ítems, ${n(st.cruzadas)} unidos a su contrato`;
   if (st.tipo === 'equivalencias') return `${n(st.aceptados)} equivalencias`;
   if (st.tipo === 'ofertas') return `${n(st.aceptados)} ofertas de sociedades (${n(st.humanas + st.sinMarcador)} de personas, sin guardar)`;
