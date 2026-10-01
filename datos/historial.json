@@ -1,1 +1,23 @@
-[]
+[
+ {
+  "corte": "2026-10-01",
+  "generado": "2026-10-01T16:01:36.536Z",
+  "totales": {
+   "contratos": 156151,
+   "empresas": 9824,
+   "organismos": 224,
+   "ministerios": 24,
+   "ofertas": 639,
+   "presupuesto": 1493,
+   "items": 0,
+   "productos": 1413,
+   "precios": 21525,
+   "ipc": 117,
+   "personasOmitidas": 101166
+  },
+  "errores": [
+   "Miércoles: 403 al bajar https://datos.produccion.gob.ar/dataset/6f47ec76-d1ce-4e34-a7e1-621fe9b1d0b5/resource/1e92cd42-4f94-4071-a165-62c4cb2ce23c/download/sepa_miercoles.zip",
+   "Miércoles: 403 al bajar https://datos.produccion.gob.ar/dataset/e9ffbef0-c8a3-4d7d-9c50-ae55a2a8f98e/resource/b32aca87-3089-40b1-ac27-f1923edb2169/download/sepa_miercoles.zip"
+  ]
+ }
+]
